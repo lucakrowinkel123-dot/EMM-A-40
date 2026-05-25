@@ -282,6 +282,7 @@ Vector3D mineSavedPos = Vector3D.Zero;
 Vector3D mineSavedForward = Vector3D.Zero;
 Vector3D mineSavedUp = Vector3D.Zero;
 Vector3D mineFrontApproachPoint = Vector3D.Zero;
+Vector3D mineCompletionApproachPoint = Vector3D.Zero;
 bool minerPathCompleteReceived = false;
 int mineStationaryTicks = 0;
 IMyBroadcastListener minerProgressListener;
@@ -301,6 +302,7 @@ bool fullAutoEnabled = false;
 bool fullAutoWaitingForMine = false;
 int fullAutoCooldownTicks = 0;
 int fullAutoActiveAsteroid = 0;
+int fullAutoPendingAsteroid = 0;
 int fullAutoEnableStationaryTicks = 0;
 bool fullAutoSelecting = false;
 List<ZoneAsteroidRecord> fullAutoScanRecords = null;
@@ -310,7 +312,7 @@ Vector3D fullAutoScanCurrent = Vector3D.Zero;
 ZoneAsteroidRecord fullAutoScanBest = null;
 double fullAutoScanBestDistSq = double.MaxValue;
 string fullAutoScanFailureReason = "no eligible asteroid found.";
-int fullAutoEscapeStage = 0; // 1 = slide to approach line, 2 = fly to front approach
+int fullAutoEscapeStage = 0; // 1 = slide to approach line, 2 = fly to selected approach
 int fullAutoEscapeAsteroidNum = 0;
 Vector3D fullAutoEscapeLinePoint = Vector3D.Zero;
 Vector3D fullAutoEscapeFrontPoint = Vector3D.Zero;
@@ -838,6 +840,7 @@ void SetFullAutoEnabledFromUi(bool enabled)
     fullAutoWaitingForMine = false;
     fullAutoCooldownTicks = 0;
     fullAutoActiveAsteroid = 0;
+    fullAutoPendingAsteroid = 0;
     ResetFullAutoSelection();
     ResetFullAutoEscape();
     Echo("Fullauto: " + (enabled ? "enabled." : "stopped."));
@@ -1530,6 +1533,8 @@ string FormatCarrierMiningDistance()
         return FormatDistance(Vector3D.Distance(GetControlledPosition(), fullAutoEscapeLinePoint));
     if (fullAutoEscapeStage == 2)
         return FormatDistance(Vector3D.Distance(GetControlledPosition(), fullAutoEscapeFrontPoint));
+    if (mineSequenceState == MineSequenceState.ReturningToFrontApproach)
+        return FormatDistance(Vector3D.Distance(GetControlledPosition(), mineCompletionApproachPoint));
 
     ZoneAsteroidRecord rec;
     ZoneDescriptor zone;
@@ -2155,6 +2160,7 @@ void RemoteCommand(string command)
             mineAsteroidNum     = 0;
             mineZoneName        = "";
             mineZoneTimerName   = "";
+            mineCompletionApproachPoint = Vector3D.Zero;
             minerPathCompleteReceived = false;
             minerPathElapsedTicks = 0;
             minerPathRuntimeSaved = false;
@@ -2170,6 +2176,7 @@ void RemoteCommand(string command)
             fullAutoWaitingForMine = false;
             fullAutoCooldownTicks = 0;
             fullAutoActiveAsteroid = 0;
+            fullAutoPendingAsteroid = 0;
             fullAutoEnableStationaryTicks = 0;
             ResetFullAutoSelection();
             ResetFullAutoEscape();
@@ -2368,6 +2375,7 @@ void StartMineSequence(string argument)
     mineSavedForward = savedForward;
     mineSavedUp = savedUp;
     mineFrontApproachPoint = savedPos + savedForward * goToLeadDistanceMeters;
+    mineCompletionApproachPoint = mineFrontApproachPoint;
     minerPathCompleteReceived = false;
     minerPathElapsedTicks = 0;
     minerPathRuntimeSaved = false;
@@ -2471,7 +2479,28 @@ void UpdateMineSequence()
 
         TrySaveCurrentMineRuntime();
 
-        StartPrecisionTarget(mineFrontApproachPoint, mineSavedForward, mineSavedUp);
+        int nextAsteroid;
+        string approachName;
+        string selectionReason;
+        if (TryPlanFullAutoPostMineApproach(out mineCompletionApproachPoint, out nextAsteroid, out approachName, out selectionReason))
+        {
+            fullAutoPendingAsteroid = nextAsteroid;
+            StartPrecisionTarget(mineCompletionApproachPoint, mineSavedForward, mineSavedUp);
+            activeMaxSpeed = maxSpeed;
+            mineSequenceState = MineSequenceState.ReturningToFrontApproach;
+            Echo($"Mine: miner complete. Next asteroid {nextAsteroid:D3} selected from {approachName} approach; moving there.");
+            return;
+        }
+
+        if (fullAutoWaitingForMine && fullAutoActiveAsteroid == mineAsteroidNum)
+        {
+            Echo("Fullauto: " + selectionReason);
+            CompleteMineSequence("Mine");
+            return;
+        }
+
+        mineCompletionApproachPoint = mineFrontApproachPoint;
+        StartPrecisionTarget(mineCompletionApproachPoint, mineSavedForward, mineSavedUp);
         activeMaxSpeed = maxSpeed;
         mineSequenceState = MineSequenceState.ReturningToFrontApproach;
         Echo($"Mine: miner complete. Returning to front approach point for asteroid {mineAsteroidNum:D3}.");
@@ -2482,32 +2511,86 @@ void UpdateMineSequence()
     {
         TrySaveCurrentMineRuntime();
 
-        if (!IsAtTargetPose(mineFrontApproachPoint, mineSavedForward, mineSavedUp))
+        if (!IsAtTargetPose(mineCompletionApproachPoint, mineSavedForward, mineSavedUp))
             return;
 
-        int completedAsteroid = mineAsteroidNum;
-        if (TrySetMineAsteroidStatus(completedAsteroid, "Completed"))
-            Echo($"Mine: asteroid {completedAsteroid:D3} status set to Completed.");
-        else
-            Echo($"Mine: warning - could not set asteroid {completedAsteroid:D3} status to Completed.");
-
-        autopilotEnabled = false;
-        hasTarget = false;
-        activeMaxSpeed = 0;
-        mineSequenceState = MineSequenceState.None;
-        mineAsteroidNum = 0;
-        mineZoneName = "";
-        mineZoneTimerName = "";
-        minerPathCompleteReceived = false;
-        minerPathElapsedTicks = 0;
-        minerPathRuntimeSaved = false;
-        mineRecallRequested = false;
-        mineRecallActive = false;
-        mineRecallAcknowledged = false;
-        mineRecallFailedTicks = 0;
-        mineStationaryTicks = 0;
-        Echo("Mine: sequence complete.");
+        CompleteMineSequence("Mine");
     }
+}
+
+bool TryPlanFullAutoPostMineApproach(out Vector3D approachPoint, out int nextAsteroid, out string approachName, out string reason)
+{
+    approachPoint = mineFrontApproachPoint;
+    nextAsteroid = 0;
+    approachName = "front";
+    reason = "no Open asteroid matches enabled ores with a safe path from front or back approach.";
+
+    if (!fullAutoEnabled || !fullAutoWaitingForMine || fullAutoActiveAsteroid != mineAsteroidNum)
+        return false;
+    if (mineSavedForward.LengthSquared() < 0.001)
+    {
+        reason = "current asteroid saved forward vector is invalid.";
+        return false;
+    }
+
+    ZoneAsteroidRecord selected;
+    string selectReason;
+    Vector3D forward = Vector3D.Normalize(mineSavedForward);
+    Vector3D frontPoint = mineSavedPos + forward * goToLeadDistanceMeters;
+    Vector3D backPoint = mineSavedPos - forward * goToLeadDistanceMeters;
+
+    if (TrySelectFullAutoAsteroidFrom(frontPoint, out selected, out selectReason))
+    {
+        approachPoint = frontPoint;
+        nextAsteroid = selected.Number;
+        approachName = "front";
+        reason = "";
+        return true;
+    }
+
+    reason = selectReason;
+    if (TrySelectFullAutoAsteroidFrom(backPoint, out selected, out selectReason))
+    {
+        approachPoint = backPoint;
+        nextAsteroid = selected.Number;
+        approachName = "back";
+        reason = "";
+        return true;
+    }
+
+    if (!string.IsNullOrWhiteSpace(selectReason))
+        reason = selectReason;
+    return false;
+}
+
+void CompleteMineSequence(string logPrefix)
+{
+    int completedAsteroid = mineAsteroidNum;
+    if (completedAsteroid > 0)
+    {
+        if (TrySetMineAsteroidStatus(completedAsteroid, "Completed"))
+            Echo($"{logPrefix}: asteroid {completedAsteroid:D3} status set to Completed.");
+        else
+            Echo($"{logPrefix}: warning - could not set asteroid {completedAsteroid:D3} status to Completed.");
+    }
+
+    autopilotEnabled = false;
+    hasTarget = false;
+    activeMaxSpeed = 0;
+    mineSequenceState = MineSequenceState.None;
+    mineAsteroidNum = 0;
+    mineZoneName = "";
+    mineZoneTimerName = "";
+    mineCompletionApproachPoint = Vector3D.Zero;
+    minerPathCompleteReceived = false;
+    minerPathElapsedTicks = 0;
+    minerPathRuntimeSaved = false;
+    mineRecallRequested = false;
+    mineRecallActive = false;
+    mineRecallAcknowledged = false;
+    mineRecallFailedTicks = 0;
+    mineStationaryTicks = 0;
+    Echo(logPrefix + ": sequence complete.");
 }
 
 void CompleteMineRecallSequence()
@@ -2574,6 +2657,14 @@ void UpdateFullAuto()
         if (mineSequenceState != MineSequenceState.None)
             return;
 
+        if (fullAutoPendingAsteroid > 0)
+        {
+            fullAutoWaitingForMine = false;
+            fullAutoActiveAsteroid = 0;
+            StartFullAutoPendingMine();
+            return;
+        }
+
         Echo($"Fullauto: asteroid {fullAutoActiveAsteroid:D3} complete.");
         fullAutoWaitingForMine = false;
         fullAutoActiveAsteroid = 0;
@@ -2589,6 +2680,12 @@ void UpdateFullAuto()
 
     if (UpdateFullAutoEscape())
         return;
+
+    if (fullAutoPendingAsteroid > 0)
+    {
+        StartFullAutoPendingMine();
+        return;
+    }
 
     if (fullAutoEscapeStage == 0 && TryStartFullAutoEscape())
         return;
@@ -2635,6 +2732,26 @@ void UpdateFullAuto()
     fullAutoWaitingForMine = true;
     fullAutoActiveAsteroid = selected.Number;
     Echo($"Fullauto: started Mine {selected.Number:D3}.");
+}
+
+void StartFullAutoPendingMine()
+{
+    int asteroidNum = fullAutoPendingAsteroid;
+    fullAutoPendingAsteroid = 0;
+    if (asteroidNum <= 0)
+        return;
+
+    StartMineSequence("Mine " + asteroidNum.ToString("D3"));
+    if (mineSequenceState == MineSequenceState.None)
+    {
+        Echo($"Fullauto: Mine {asteroidNum:D3} did not start. Retrying later.");
+        fullAutoCooldownTicks = Math.Max(1, fullAutoRetryTicks);
+        return;
+    }
+
+    fullAutoWaitingForMine = true;
+    fullAutoActiveAsteroid = asteroidNum;
+    Echo($"Fullauto: started Mine {asteroidNum:D3}.");
 }
 
 bool StartFullAutoSelection(out string reason)
@@ -2741,6 +2858,7 @@ bool UpdateFullAutoEscape()
     if (!autopilotEnabled || !hasTarget)
     {
         ResetFullAutoEscape();
+        fullAutoPendingAsteroid = 0;
         return false;
     }
 
@@ -2752,7 +2870,7 @@ bool UpdateFullAutoEscape()
         StartPrecisionTarget(fullAutoEscapeFrontPoint, Vector3D.Zero, Vector3D.Zero);
         activeMaxSpeed = maxSpeed;
         fullAutoEscapeStage = 2;
-        Echo($"Fullauto: corridor reached for asteroid {fullAutoEscapeAsteroidNum:D3}. Moving to front approach.");
+        Echo($"Fullauto: corridor reached for asteroid {fullAutoEscapeAsteroidNum:D3}. Moving to selected approach.");
         return true;
     }
 
@@ -2764,7 +2882,7 @@ bool UpdateFullAutoEscape()
         int asteroidNum = fullAutoEscapeAsteroidNum;
         ResetFullAutoEscape();
         fullAutoCooldownTicks = 0;
-        Echo($"Fullauto: front approach reached for asteroid {asteroidNum:D3}. Starting normal selection.");
+        Echo($"Fullauto: approach reached for asteroid {asteroidNum:D3}. Starting selected Mine.");
         return false;
     }
 
@@ -2787,26 +2905,38 @@ bool TryStartFullAutoEscape()
     Vector3D current = GetControlledPosition();
     ZoneAsteroidRecord bestRec = null;
     Vector3D bestLinePoint = Vector3D.Zero;
-    Vector3D bestFrontPoint = Vector3D.Zero;
+    Vector3D bestApproachPoint = Vector3D.Zero;
     Vector3D bestForward = Vector3D.Zero;
     Vector3D bestUp = Vector3D.Zero;
+    int bestNextAsteroid = 0;
     double bestDistSq = double.MaxValue;
 
     for (int i = 0; i < records.Count; i++)
     {
-        Vector3D linePoint, frontPoint, forward, up;
+        Vector3D linePoint, backPoint, frontPoint, forward, up;
         double distSq;
-        if (!TryGetFullAutoCorridorEscape(records[i], current, out linePoint, out frontPoint, out forward, out up, out distSq))
+        if (!TryGetFullAutoCorridorEscape(records[i], current, out linePoint, out backPoint, out frontPoint, out forward, out up, out distSq))
             continue;
+
+        ZoneAsteroidRecord selected;
+        string selectReason;
+        Vector3D approachPoint = frontPoint;
+        if (!TrySelectFullAutoAsteroidFrom(frontPoint, out selected, out selectReason))
+        {
+            if (!TrySelectFullAutoAsteroidFrom(backPoint, out selected, out selectReason))
+                continue;
+            approachPoint = backPoint;
+        }
 
         if (distSq < bestDistSq)
         {
             bestDistSq = distSq;
             bestRec = records[i];
             bestLinePoint = linePoint;
-            bestFrontPoint = frontPoint;
+            bestApproachPoint = approachPoint;
             bestForward = forward;
             bestUp = up;
+            bestNextAsteroid = selected.Number;
         }
     }
 
@@ -2816,16 +2946,17 @@ bool TryStartFullAutoEscape()
     ResetFullAutoSelection();
     fullAutoEscapeAsteroidNum = bestRec.Number;
     fullAutoEscapeLinePoint = bestLinePoint;
-    fullAutoEscapeFrontPoint = bestFrontPoint;
+    fullAutoEscapeFrontPoint = bestApproachPoint;
     fullAutoEscapeForward = bestForward;
     fullAutoEscapeUp = bestUp;
+    fullAutoPendingAsteroid = bestNextAsteroid;
 
     if (Vector3D.DistanceSquared(current, bestLinePoint) <= Math.Max(0.05, arrivalTolerance) * Math.Max(0.05, arrivalTolerance))
     {
         fullAutoEscapeStage = 2;
         StartPrecisionTarget(fullAutoEscapeFrontPoint, Vector3D.Zero, Vector3D.Zero);
         activeMaxSpeed = maxSpeed;
-        Echo($"Fullauto: inside asteroid {bestRec.Number:D3} corridor. Moving to front approach.");
+        Echo($"Fullauto: inside asteroid {bestRec.Number:D3} corridor. Moving to selected approach.");
     }
     else
     {
@@ -2839,10 +2970,11 @@ bool TryStartFullAutoEscape()
 }
 
 bool TryGetFullAutoCorridorEscape(ZoneAsteroidRecord rec, Vector3D current,
-                                  out Vector3D linePoint, out Vector3D frontPoint,
+                                  out Vector3D linePoint, out Vector3D backPoint, out Vector3D frontPoint,
                                   out Vector3D forward, out Vector3D up, out double distSq)
 {
     linePoint = Vector3D.Zero;
+    backPoint = Vector3D.Zero;
     frontPoint = Vector3D.Zero;
     forward = Vector3D.Zero;
     up = Vector3D.Zero;
@@ -2857,9 +2989,9 @@ bool TryGetFullAutoCorridorEscape(ZoneAsteroidRecord rec, Vector3D current,
 
     forward = Vector3D.Normalize(rec.Forward);
     up = Vector3D.Normalize(rec.Up);
-    Vector3D rearPoint = rec.Position - forward * goToLeadDistanceMeters;
+    backPoint = rec.Position - forward * goToLeadDistanceMeters;
     frontPoint = rec.Position + forward * goToLeadDistanceMeters;
-    linePoint = ClosestPointOnSegment(current, rearPoint, frontPoint);
+    linePoint = ClosestPointOnSegment(current, backPoint, frontPoint);
     distSq = Vector3D.DistanceSquared(current, linePoint);
 
     double corridor = Math.Max(0.1, fullAutoCorridorLineToleranceMeters);
@@ -2879,6 +3011,11 @@ Vector3D ClosestPointOnSegment(Vector3D point, Vector3D a, Vector3D b)
 }
 
 bool TrySelectFullAutoAsteroid(out ZoneAsteroidRecord selected, out string reason)
+{
+    return TrySelectFullAutoAsteroidFrom(GetControlledPosition(), out selected, out reason);
+}
+
+bool TrySelectFullAutoAsteroidFrom(Vector3D current, out ZoneAsteroidRecord selected, out string reason)
 {
     selected = null;
     reason = "no eligible asteroid found.";
@@ -2903,12 +3040,13 @@ bool TrySelectFullAutoAsteroid(out ZoneAsteroidRecord selected, out string reaso
         return false;
     }
 
-    Vector3D current = GetControlledPosition();
     ZoneAsteroidRecord best = null;
     double bestDistSq = double.MaxValue;
 
     foreach (var rec in records)
     {
+        if (mineAsteroidNum > 0 && rec.Number == mineAsteroidNum)
+            continue;
         if (!string.Equals(rec.Status, "Open", StringComparison.OrdinalIgnoreCase))
             continue;
         if (!RecordHasEnabledOre(rec, enabledOres))
@@ -5170,6 +5308,7 @@ void SaveState()
     ini.Set(StateIniSection, "mineSavedForward", V3ToString(mineSavedForward));
     ini.Set(StateIniSection, "mineSavedUp", V3ToString(mineSavedUp));
     ini.Set(StateIniSection, "mineFrontApproachPoint", V3ToString(mineFrontApproachPoint));
+    ini.Set(StateIniSection, "mineCompletionApproachPoint", V3ToString(mineCompletionApproachPoint));
     ini.Set(StateIniSection, "minerPathCompleteReceived", minerPathCompleteReceived ? "1" : "0");
     ini.Set(StateIniSection, "minerPathElapsedTicks", minerPathElapsedTicks);
     ini.Set(StateIniSection, "minerPathRuntimeSaved", minerPathRuntimeSaved ? "1" : "0");
@@ -5184,6 +5323,7 @@ void SaveState()
     ini.Set(StateIniSection, "fullAutoWaitingForMine", fullAutoWaitingForMine ? "1" : "0");
     ini.Set(StateIniSection, "fullAutoCooldownTicks", fullAutoCooldownTicks);
     ini.Set(StateIniSection, "fullAutoActiveAsteroid", fullAutoActiveAsteroid);
+    ini.Set(StateIniSection, "fullAutoPendingAsteroid", fullAutoPendingAsteroid);
     ini.Set(StateIniSection, "fullAutoEnableStationaryTicks", fullAutoEnableStationaryTicks);
     ini.Set(StateIniSection, "fullAutoEscapeStage", fullAutoEscapeStage);
     ini.Set(StateIniSection, "fullAutoEscapeAsteroidNum", fullAutoEscapeAsteroidNum);
@@ -5234,6 +5374,7 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "mineSavedForward", V3ToString(mineSavedForward));
     ini.Set(ProgressIniSection, "mineSavedUp", V3ToString(mineSavedUp));
     ini.Set(ProgressIniSection, "mineFrontApproachPoint", V3ToString(mineFrontApproachPoint));
+    ini.Set(ProgressIniSection, "mineCompletionApproachPoint", V3ToString(mineCompletionApproachPoint));
     ini.Set(ProgressIniSection, "minerPathCompleteReceived", minerPathCompleteReceived ? "1" : "0");
     ini.Set(ProgressIniSection, "minerPathElapsedTicks", minerPathElapsedTicks);
     ini.Set(ProgressIniSection, "minerPathRuntimeSaved", minerPathRuntimeSaved ? "1" : "0");
@@ -5248,6 +5389,7 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "fullAutoWaitingForMine", fullAutoWaitingForMine ? "1" : "0");
     ini.Set(ProgressIniSection, "fullAutoCooldownTicks", fullAutoCooldownTicks);
     ini.Set(ProgressIniSection, "fullAutoActiveAsteroid", fullAutoActiveAsteroid);
+    ini.Set(ProgressIniSection, "fullAutoPendingAsteroid", fullAutoPendingAsteroid);
     ini.Set(ProgressIniSection, "fullAutoEnableStationaryTicks", fullAutoEnableStationaryTicks);
     ini.Set(ProgressIniSection, "fullAutoEscapeStage", fullAutoEscapeStage);
     ini.Set(ProgressIniSection, "fullAutoEscapeAsteroidNum", fullAutoEscapeAsteroidNum);
@@ -5337,6 +5479,7 @@ void LoadState()
     if (TryParseV3(StateString(ini, "mineSavedForward", V3ToString(mineSavedForward)), out v)) mineSavedForward = v;
     if (TryParseV3(StateString(ini, "mineSavedUp", V3ToString(mineSavedUp)), out v)) mineSavedUp = v;
     if (TryParseV3(StateString(ini, "mineFrontApproachPoint", V3ToString(mineFrontApproachPoint)), out v)) mineFrontApproachPoint = v;
+    if (TryParseV3(StateString(ini, "mineCompletionApproachPoint", V3ToString(mineFrontApproachPoint)), out v)) mineCompletionApproachPoint = v;
     minerPathCompleteReceived = StateBool(ini, "minerPathCompleteReceived", minerPathCompleteReceived);
     if (int.TryParse(StateString(ini, "minerPathElapsedTicks", minerPathElapsedTicks.ToString()), out n)) minerPathElapsedTicks = Math.Max(0, n);
     minerPathRuntimeSaved = StateBool(ini, "minerPathRuntimeSaved", minerPathRuntimeSaved);
@@ -5350,6 +5493,7 @@ void LoadState()
     fullAutoEnabled = StateBool(ini, "fullAutoEnabled", fullAutoEnabled);
     fullAutoWaitingForMine = StateBool(ini, "fullAutoWaitingForMine", fullAutoWaitingForMine);
     if (int.TryParse(StateString(ini, "fullAutoActiveAsteroid", fullAutoActiveAsteroid.ToString()), out n)) fullAutoActiveAsteroid = n;
+    if (int.TryParse(StateString(ini, "fullAutoPendingAsteroid", fullAutoPendingAsteroid.ToString()), out n)) fullAutoPendingAsteroid = Math.Max(0, n);
     if (int.TryParse(StateString(ini, "fullAutoCooldownTicks", fullAutoCooldownTicks.ToString()), out n)) fullAutoCooldownTicks = n;
     if (int.TryParse(StateString(ini, "fullAutoEnableStationaryTicks", fullAutoEnableStationaryTicks.ToString()), out n)) fullAutoEnableStationaryTicks = n;
     if (int.TryParse(StateString(ini, "fullAutoEscapeStage", fullAutoEscapeStage.ToString()), out n)) fullAutoEscapeStage = Math.Max(0, Math.Min(2, n));
