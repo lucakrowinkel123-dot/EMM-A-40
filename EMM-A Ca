@@ -262,7 +262,7 @@ bool _hasProgressState = false;
 bool fullStateDirty = false;
 
 bool goToMode = false;
-int goToStage = 0; // 1 = flying to safe side-point, 2 = final approach to saved carrier pose
+int goToStage = 0; // 1 = flying to safe side-point, 2 = fly to saved position, 3 = rotate to saved carrier pose
 IMyBroadcastListener minerPathCompleteListener;
 
 enum MineSequenceState
@@ -283,6 +283,8 @@ Vector3D mineSavedForward = Vector3D.Zero;
 Vector3D mineSavedUp = Vector3D.Zero;
 Vector3D mineFrontApproachPoint = Vector3D.Zero;
 Vector3D mineCompletionApproachPoint = Vector3D.Zero;
+Vector3D mineCompletionForward = Vector3D.Zero;
+Vector3D mineCompletionUp = Vector3D.Zero;
 bool minerPathCompleteReceived = false;
 int mineStationaryTicks = 0;
 IMyBroadcastListener minerProgressListener;
@@ -2155,12 +2157,15 @@ void RemoteCommand(string command)
             desiredUp           = Vector3D.Zero;
             goToMode            = false;
             goToStage           = 0;
+            _goToTravelForward  = Vector3D.Zero;
             carrierAutopilotMode = CarrierAutopilotMode.Precision;
             mineSequenceState   = MineSequenceState.None;
             mineAsteroidNum     = 0;
             mineZoneName        = "";
             mineZoneTimerName   = "";
             mineCompletionApproachPoint = Vector3D.Zero;
+            mineCompletionForward = Vector3D.Zero;
+            mineCompletionUp = Vector3D.Zero;
             minerPathCompleteReceived = false;
             minerPathElapsedTicks = 0;
             minerPathRuntimeSaved = false;
@@ -2376,6 +2381,8 @@ void StartMineSequence(string argument)
     mineSavedUp = savedUp;
     mineFrontApproachPoint = savedPos + savedForward * goToLeadDistanceMeters;
     mineCompletionApproachPoint = mineFrontApproachPoint;
+    mineCompletionForward = savedForward;
+    mineCompletionUp = savedUp;
     minerPathCompleteReceived = false;
     minerPathElapsedTicks = 0;
     minerPathRuntimeSaved = false;
@@ -2482,10 +2489,10 @@ void UpdateMineSequence()
         int nextAsteroid;
         string approachName;
         string selectionReason;
-        if (TryPlanFullAutoPostMineApproach(out mineCompletionApproachPoint, out nextAsteroid, out approachName, out selectionReason))
+        if (TryPlanFullAutoPostMineApproach(out mineCompletionApproachPoint, out mineCompletionForward, out mineCompletionUp, out nextAsteroid, out approachName, out selectionReason))
         {
             fullAutoPendingAsteroid = nextAsteroid;
-            StartPrecisionTarget(mineCompletionApproachPoint, mineSavedForward, mineSavedUp);
+            StartPrecisionTarget(mineCompletionApproachPoint, mineCompletionForward, mineCompletionUp);
             activeMaxSpeed = maxSpeed;
             mineSequenceState = MineSequenceState.ReturningToFrontApproach;
             Echo($"Mine: miner complete. Next asteroid {nextAsteroid:D3} selected from {approachName} approach; moving there.");
@@ -2500,7 +2507,9 @@ void UpdateMineSequence()
         }
 
         mineCompletionApproachPoint = mineFrontApproachPoint;
-        StartPrecisionTarget(mineCompletionApproachPoint, mineSavedForward, mineSavedUp);
+        mineCompletionForward = mineSavedForward;
+        mineCompletionUp = mineSavedUp;
+        StartPrecisionTarget(mineCompletionApproachPoint, mineCompletionForward, mineCompletionUp);
         activeMaxSpeed = maxSpeed;
         mineSequenceState = MineSequenceState.ReturningToFrontApproach;
         Echo($"Mine: miner complete. Returning to front approach point for asteroid {mineAsteroidNum:D3}.");
@@ -2511,16 +2520,18 @@ void UpdateMineSequence()
     {
         TrySaveCurrentMineRuntime();
 
-        if (!IsAtTargetPose(mineCompletionApproachPoint, mineSavedForward, mineSavedUp))
+        if (!IsAtTargetPose(mineCompletionApproachPoint, mineCompletionForward, mineCompletionUp))
             return;
 
         CompleteMineSequence("Mine");
     }
 }
 
-bool TryPlanFullAutoPostMineApproach(out Vector3D approachPoint, out int nextAsteroid, out string approachName, out string reason)
+bool TryPlanFullAutoPostMineApproach(out Vector3D approachPoint, out Vector3D approachForward, out Vector3D approachUp, out int nextAsteroid, out string approachName, out string reason)
 {
     approachPoint = mineFrontApproachPoint;
+    approachForward = mineSavedForward;
+    approachUp = mineSavedUp;
     nextAsteroid = 0;
     approachName = "front";
     reason = "no Open asteroid matches enabled ores with a safe path from front or back approach.";
@@ -2542,6 +2553,8 @@ bool TryPlanFullAutoPostMineApproach(out Vector3D approachPoint, out int nextAst
     if (TrySelectFullAutoAsteroidFrom(frontPoint, out selected, out selectReason))
     {
         approachPoint = frontPoint;
+        approachForward = GetTravelForward(GetControlledPosition(), frontPoint, forward);
+        approachUp = mineSavedUp;
         nextAsteroid = selected.Number;
         approachName = "front";
         reason = "";
@@ -2552,6 +2565,8 @@ bool TryPlanFullAutoPostMineApproach(out Vector3D approachPoint, out int nextAst
     if (TrySelectFullAutoAsteroidFrom(backPoint, out selected, out selectReason))
     {
         approachPoint = backPoint;
+        approachForward = GetTravelForward(GetControlledPosition(), backPoint, -forward);
+        approachUp = mineSavedUp;
         nextAsteroid = selected.Number;
         approachName = "back";
         reason = "";
@@ -2582,6 +2597,8 @@ void CompleteMineSequence(string logPrefix)
     mineZoneName = "";
     mineZoneTimerName = "";
     mineCompletionApproachPoint = Vector3D.Zero;
+    mineCompletionForward = Vector3D.Zero;
+    mineCompletionUp = Vector3D.Zero;
     minerPathCompleteReceived = false;
     minerPathElapsedTicks = 0;
     minerPathRuntimeSaved = false;
@@ -2611,6 +2628,9 @@ void CompleteMineRecallSequence()
     mineAsteroidNum = 0;
     mineZoneName = "";
     mineZoneTimerName = "";
+    mineCompletionApproachPoint = Vector3D.Zero;
+    mineCompletionForward = Vector3D.Zero;
+    mineCompletionUp = Vector3D.Zero;
     minerPathCompleteReceived = false;
     minerPathElapsedTicks = 0;
     minerPathRuntimeSaved = false;
@@ -4489,6 +4509,7 @@ void HandleGoTo(string argument)
     _goToFinalPosition = savedPos;
     _goToFinalForward  = savedForward;
     _goToFinalUp       = savedUp;
+    _goToTravelForward = Vector3D.Zero;
 
     if (Vector3D.Distance(currentPos, chosenPoint) >= Math.Max(100, shortRangeDistanceMeters))
         StartCruiseTarget(chosenPoint, Vector3D.Zero, Vector3D.Zero);
@@ -4501,6 +4522,7 @@ void HandleGoTo(string argument)
 Vector3D _goToFinalPosition = Vector3D.Zero;
 Vector3D _goToFinalForward  = Vector3D.Zero;
 Vector3D _goToFinalUp       = Vector3D.Zero;
+Vector3D _goToTravelForward = Vector3D.Zero;
 
 void UpdateGoToRunner()
 {
@@ -4509,18 +4531,41 @@ void UpdateGoToRunner()
 
     if (goToStage == 1 && IsAtTargetPosition(targetPosition))
     {
-        StartPrecisionTarget(_goToFinalPosition, _goToFinalForward, _goToFinalUp);
+        _goToTravelForward = GetTravelForward(targetPosition, _goToFinalPosition, _goToFinalForward);
+        StartPrecisionTarget(_goToFinalPosition, _goToTravelForward, _goToFinalUp);
         goToStage      = 2;
-        Echo("GoTo: side-point reached. Starting final approach.");
+        Echo("GoTo: side-point reached. Flying to saved position.");
         return;
     }
 
-    if (goToStage == 2 && IsAtTargetPose(_goToFinalPosition, _goToFinalForward, _goToFinalUp))
+    if (goToStage == 2 && _goToTravelForward.LengthSquared() < 0.001)
+        _goToTravelForward = desiredForward.LengthSquared() > 0.001 ? desiredForward : _goToFinalForward;
+
+    if (goToStage == 2 && IsAtTargetPose(_goToFinalPosition, _goToTravelForward, _goToFinalUp))
+    {
+        StartPrecisionTarget(_goToFinalPosition, _goToFinalForward, _goToFinalUp);
+        goToStage = 3;
+        Echo("GoTo: saved position reached. Rotating to saved pose.");
+        return;
+    }
+
+    if (goToStage == 3 && IsAtTargetPose(_goToFinalPosition, _goToFinalForward, _goToFinalUp))
     {
         goToMode      = false;
         goToStage     = 0;
+        _goToTravelForward = Vector3D.Zero;
         Echo("GoTo: final pose reached.");
     }
+}
+
+Vector3D GetTravelForward(Vector3D from, Vector3D to, Vector3D fallback)
+{
+    Vector3D travel = to - from;
+    if (travel.LengthSquared() > 0.001)
+        return Vector3D.Normalize(travel);
+    if (fallback.LengthSquared() > 0.001)
+        return Vector3D.Normalize(fallback);
+    return _tickRcMatrix.Forward;
 }
 
 bool TryGetCarrierPoseFromZoneDb(int asteroidNum, out Vector3D pos, out Vector3D forward, out Vector3D up)
@@ -5300,6 +5345,7 @@ void SaveState()
     ini.Set(StateIniSection, "goToFinalPosition", V3ToString(_goToFinalPosition));
     ini.Set(StateIniSection, "goToFinalForward", V3ToString(_goToFinalForward));
     ini.Set(StateIniSection, "goToFinalUp", V3ToString(_goToFinalUp));
+    ini.Set(StateIniSection, "goToTravelForward", V3ToString(_goToTravelForward));
     ini.Set(StateIniSection, "mineSequenceState", (int)mineSequenceState);
     ini.Set(StateIniSection, "mineAsteroidNum", mineAsteroidNum);
     ini.Set(StateIniSection, "mineZoneName", mineZoneName);
@@ -5309,6 +5355,8 @@ void SaveState()
     ini.Set(StateIniSection, "mineSavedUp", V3ToString(mineSavedUp));
     ini.Set(StateIniSection, "mineFrontApproachPoint", V3ToString(mineFrontApproachPoint));
     ini.Set(StateIniSection, "mineCompletionApproachPoint", V3ToString(mineCompletionApproachPoint));
+    ini.Set(StateIniSection, "mineCompletionForward", V3ToString(mineCompletionForward));
+    ini.Set(StateIniSection, "mineCompletionUp", V3ToString(mineCompletionUp));
     ini.Set(StateIniSection, "minerPathCompleteReceived", minerPathCompleteReceived ? "1" : "0");
     ini.Set(StateIniSection, "minerPathElapsedTicks", minerPathElapsedTicks);
     ini.Set(StateIniSection, "minerPathRuntimeSaved", minerPathRuntimeSaved ? "1" : "0");
@@ -5366,6 +5414,7 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "goToFinalPosition", V3ToString(_goToFinalPosition));
     ini.Set(ProgressIniSection, "goToFinalForward", V3ToString(_goToFinalForward));
     ini.Set(ProgressIniSection, "goToFinalUp", V3ToString(_goToFinalUp));
+    ini.Set(ProgressIniSection, "goToTravelForward", V3ToString(_goToTravelForward));
     ini.Set(ProgressIniSection, "mineSequenceState", (int)mineSequenceState);
     ini.Set(ProgressIniSection, "mineAsteroidNum", mineAsteroidNum);
     ini.Set(ProgressIniSection, "mineZoneName", mineZoneName);
@@ -5375,6 +5424,8 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "mineSavedUp", V3ToString(mineSavedUp));
     ini.Set(ProgressIniSection, "mineFrontApproachPoint", V3ToString(mineFrontApproachPoint));
     ini.Set(ProgressIniSection, "mineCompletionApproachPoint", V3ToString(mineCompletionApproachPoint));
+    ini.Set(ProgressIniSection, "mineCompletionForward", V3ToString(mineCompletionForward));
+    ini.Set(ProgressIniSection, "mineCompletionUp", V3ToString(mineCompletionUp));
     ini.Set(ProgressIniSection, "minerPathCompleteReceived", minerPathCompleteReceived ? "1" : "0");
     ini.Set(ProgressIniSection, "minerPathElapsedTicks", minerPathElapsedTicks);
     ini.Set(ProgressIniSection, "minerPathRuntimeSaved", minerPathRuntimeSaved ? "1" : "0");
@@ -5471,6 +5522,7 @@ void LoadState()
     if (TryParseV3(StateString(ini, "goToFinalPosition", V3ToString(_goToFinalPosition)), out v)) _goToFinalPosition = v;
     if (TryParseV3(StateString(ini, "goToFinalForward", V3ToString(_goToFinalForward)), out v)) _goToFinalForward = v;
     if (TryParseV3(StateString(ini, "goToFinalUp", V3ToString(_goToFinalUp)), out v)) _goToFinalUp = v;
+    if (TryParseV3(StateString(ini, "goToTravelForward", V3ToString(_goToTravelForward)), out v)) _goToTravelForward = v;
     if (int.TryParse(StateString(ini, "mineSequenceState", ((int)mineSequenceState).ToString()), out n)) mineSequenceState = (MineSequenceState)n;
     if (int.TryParse(StateString(ini, "mineAsteroidNum", mineAsteroidNum.ToString()), out n)) mineAsteroidNum = n;
     mineZoneName = StateString(ini, "mineZoneName", mineZoneName);
@@ -5480,6 +5532,8 @@ void LoadState()
     if (TryParseV3(StateString(ini, "mineSavedUp", V3ToString(mineSavedUp)), out v)) mineSavedUp = v;
     if (TryParseV3(StateString(ini, "mineFrontApproachPoint", V3ToString(mineFrontApproachPoint)), out v)) mineFrontApproachPoint = v;
     if (TryParseV3(StateString(ini, "mineCompletionApproachPoint", V3ToString(mineFrontApproachPoint)), out v)) mineCompletionApproachPoint = v;
+    if (TryParseV3(StateString(ini, "mineCompletionForward", V3ToString(mineSavedForward)), out v)) mineCompletionForward = v;
+    if (TryParseV3(StateString(ini, "mineCompletionUp", V3ToString(mineSavedUp)), out v)) mineCompletionUp = v;
     minerPathCompleteReceived = StateBool(ini, "minerPathCompleteReceived", minerPathCompleteReceived);
     if (int.TryParse(StateString(ini, "minerPathElapsedTicks", minerPathElapsedTicks.ToString()), out n)) minerPathElapsedTicks = Math.Max(0, n);
     minerPathRuntimeSaved = StateBool(ini, "minerPathRuntimeSaved", minerPathRuntimeSaved);

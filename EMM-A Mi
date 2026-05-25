@@ -2134,6 +2134,7 @@ void StartManualDock()
     if (pathRecordingEnabled)
     {
         saveAsteroidAfterDock = !updateAsteroidAfterDock;
+        AppendDockReturnPoseRecord();
         if (!AppendPathRecordLine("dock"))
             Echo($"Warning: could not write 'dock' to timer '{pathTimerTag}'; timer not found.");
         StopPathRecording();
@@ -2144,6 +2145,27 @@ void StartManualDock()
         updateAsteroidAfterDock = false;
     }
     StartDock();
+}
+
+bool AppendDockReturnPoseRecord()
+{
+    Vector3D anchorPos, anchorForward, anchorUp;
+    if (!TryGetOrInitPathTimerAnchor(out anchorPos, out anchorForward, out anchorUp))
+    {
+        Echo($"Warning: could not write final dock pose to timer '{pathTimerTag}'; anchor unavailable.");
+        return false;
+    }
+
+    string line = FormatPathPointLine(anchorPos, anchorPos, anchorForward, anchorUp);
+    if (!AppendPathRecordLine(line))
+    {
+        Echo($"Warning: could not write final dock pose to timer '{pathTimerTag}'; timer not found.");
+        return false;
+    }
+
+    pathRecordCounter++;
+    TriggerPathPointFlash();
+    return true;
 }
 
 void StartPathRecording(string command)
