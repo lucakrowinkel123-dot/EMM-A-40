@@ -169,6 +169,7 @@ bool pathRunTimerStarted = false;
 bool pathRunTimerActive = false;
 int pathRunElapsedTicks = 0;
 bool suppressPathRuntimeWrite = false;
+bool pathDockPending = false;
 Vector3D pathAnchorPos = Vector3D.Zero;
 Vector3D pathAnchorForward = Vector3D.Zero;
 Vector3D pathAnchorUp = Vector3D.Zero;
@@ -812,6 +813,12 @@ void SelectMinerCursor()
             miMenuIndex = mineAreaAdjustCornerA ? 2 : 3;
             return;
         }
+        if (miLcdMenu == MiLcdMenu.MineArea && pathMode)
+        {
+            OpenMinerMenu(MiLcdMenu.FollowPath);
+            miMenuIndex = 1;
+            return;
+        }
         OpenMinerMenu(MiLcdMenu.Main);
         return;
     }
@@ -1057,7 +1064,9 @@ void UpdateMinerLcd()
 void AppendMinerHeader(StringBuilder sb)
 {
     sb.Append(" EMM-A Miner | ");
-    if (miLcdMenu == MiLcdMenu.RecordPath ||
+    if (miLcdMenu == MiLcdMenu.Main && IsExcavationZoneActive() && GetMineAreaLaneHeaderTotal() > 0)
+        sb.AppendLine(GetMineAreaLaneHeaderText());
+    else if (miLcdMenu == MiLcdMenu.RecordPath ||
         miLcdMenu == MiLcdMenu.SetMinePose ||
         miLcdMenu == MiLcdMenu.SetCornerA)
         sb.AppendLine(pathRecordCounter.ToString("000"));
@@ -1143,7 +1152,7 @@ void AppendMinerRows(StringBuilder sb)
 {
     if (miLcdMenu == MiLcdMenu.Main)
     {
-        AppendMinerMenuRow(sb, PathTimerHasRecordedPath() && !pathMode ? "Continue recording path" : "Record path", 0, false);
+        AppendMinerMenuRow(sb, GetMainPathMenuText(), 0, false);
         bool dockVisible = MainDockItemVisible();
         if (dockVisible)
             AppendMinerMenuRow(sb, IsMinerDocked() ? "Undock" : "Dock", 1, false);
@@ -1302,6 +1311,8 @@ string GetMinerFooterInfo()
         if (miMenuIndex == 2) return "Adjust miner behavior.";
         if (miMenuIndex == 3) return "Show miner stats.";
     }
+    if (miMenuIndex == 0 && miLcdMenu == MiLcdMenu.MineArea && pathMode)
+        return "Return to EMM-A previous menu.";
     if (miMenuIndex == 0)
         return "Return to EMM-A main menu.";
     if (miLcdMenu == MiLcdMenu.BehaviorSettings)
@@ -1968,6 +1979,7 @@ void RemoteCommand (string command)
             pathMode = false;
             pathPaused = false;
             pathPausedNavResume = false;
+            pathDockPending = false;
             pathRecords.Clear();
             pathIndex = 0;
             ResetPathRunTimer();
@@ -2134,7 +2146,6 @@ void StartManualDock()
     if (pathRecordingEnabled)
     {
         saveAsteroidAfterDock = !updateAsteroidAfterDock;
-        AppendDockReturnPoseRecord();
         if (!AppendPathRecordLine("dock"))
             Echo($"Warning: could not write 'dock' to timer '{pathTimerTag}'; timer not found.");
         StopPathRecording();
@@ -2147,25 +2158,11 @@ void StartManualDock()
     StartDock();
 }
 
-bool AppendDockReturnPoseRecord()
+string GetMainPathMenuText()
 {
-    Vector3D anchorPos, anchorForward, anchorUp;
-    if (!TryGetOrInitPathTimerAnchor(out anchorPos, out anchorForward, out anchorUp))
-    {
-        Echo($"Warning: could not write final dock pose to timer '{pathTimerTag}'; anchor unavailable.");
-        return false;
-    }
-
-    string line = FormatPathPointLine(anchorPos, anchorPos, anchorForward, anchorUp);
-    if (!AppendPathRecordLine(line))
-    {
-        Echo($"Warning: could not write final dock pose to timer '{pathTimerTag}'; timer not found.");
-        return false;
-    }
-
-    pathRecordCounter++;
-    TriggerPathPointFlash();
-    return true;
+    if (pathMode)
+        return "Path follow tools.";
+    return PathTimerHasRecordedPath() ? "Continue recording path" : "Record path";
 }
 
 void StartPathRecording(string command)
@@ -3064,6 +3061,7 @@ void ClearPathTimerAndCounters(bool clearReverseState)
 
     pathRecordCounter = 0;
     pathRecordMineCounter = 0;
+    pathDockPending = false;
     ResetPathRunTimer();
     saveAsteroidAfterDock = false;
     updateAsteroidAfterDock = false;
@@ -3161,6 +3159,12 @@ void UpdatePathRunner()
             autopilotEnabled = false;
             hasTarget = false;
             activeMaxSpeed = 0;
+            if (pathDockPending)
+            {
+                pathDockPending = false;
+                StartDock();
+                return;
+            }
             if (pathMode && !pathRecordingEnabled && miLcdMenu == MiLcdMenu.MineArea)
             {
                 OpenMinerMenu(MiLcdMenu.FollowPath);
@@ -3185,6 +3189,7 @@ void StopPathExecution()
     pathMode = false;
     pathPaused = false;
     pathPausedNavResume = false;
+    pathDockPending = false;
     pathRecords.Clear();
     pathIndex = 0;
     pathCompleteBroadcastTicks = 0;
@@ -4654,6 +4659,7 @@ void StartPathFromTimer()
     pathMode = true;
     pathPaused = false;
     pathPausedNavResume = false;
+    pathDockPending = false;
     pathCompleteBroadcastTicks = 0;
     appendPathActive = false;
     appendPathStopRecordIndex = -1;
@@ -4805,6 +4811,16 @@ bool ExecutePathRecord(string rawRecord)
     }
     if (record.Equals("dock", StringComparison.OrdinalIgnoreCase))
     {
+        if (pathMode && pathAnchorValid)
+        {
+            targetPosition = pathAnchorPos;
+            desiredForward = pathAnchorForward;
+            desiredUp = pathAnchorUp;
+            hasTarget = true;
+            autopilotEnabled = true;
+            pathDockPending = true;
+            return true;
+        }
         StartDock();
         return dockingState != DockingState.None || dockRetryPending;
     }
@@ -6004,6 +6020,7 @@ void SaveState()
     ini.Set(StateIniSection, "pathMode", pathMode ? "1" : "0");
     ini.Set(StateIniSection, "pathPaused", pathPaused ? "1" : "0");
     ini.Set(StateIniSection, "pathPausedNavResume", pathPausedNavResume ? "1" : "0");
+    ini.Set(StateIniSection, "pathDockPending", pathDockPending ? "1" : "0");
     ini.Set(StateIniSection, "pathIndex", pathIndex);
     ini.Set(StateIniSection, "pathCompleteBroadcastTicks", pathCompleteBroadcastTicks);
     ini.Set(StateIniSection, "pathRunTimerStarted", pathRunTimerStarted ? "1" : "0");
@@ -6112,6 +6129,7 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathMode", pathMode ? "1" : "0");
     ini.Set(ProgressIniSection, "pathPaused", pathPaused ? "1" : "0");
     ini.Set(ProgressIniSection, "pathPausedNavResume", pathPausedNavResume ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathDockPending", pathDockPending ? "1" : "0");
     ini.Set(ProgressIniSection, "pathIndex", pathIndex);
     ini.Set(ProgressIniSection, "pathCompleteBroadcastTicks", pathCompleteBroadcastTicks);
     ini.Set(ProgressIniSection, "pathRunTimerStarted", pathRunTimerStarted ? "1" : "0");
@@ -6222,6 +6240,7 @@ void LoadState()
     pathMode = StateBool(ini, "pathMode", pathMode);
     pathPaused = StateBool(ini, "pathPaused", pathPaused);
     pathPausedNavResume = StateBool(ini, "pathPausedNavResume", pathPausedNavResume);
+    pathDockPending = StateBool(ini, "pathDockPending", pathDockPending);
     if (int.TryParse(StateString(ini, "pathIndex", pathIndex.ToString()), out n)) pathIndex = n;
     if (int.TryParse(StateString(ini, "pathCompleteBroadcastTicks", pathCompleteBroadcastTicks.ToString()), out n)) pathCompleteBroadcastTicks = n;
     pathRunTimerStarted = StateBool(ini, "pathRunTimerStarted", pathRunTimerStarted);
