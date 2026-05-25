@@ -716,7 +716,7 @@ bool TryHandleMinerLcdCommand(string trimmed)
 
 int GetMinerMenuItemCount()
 {
-    if (miLcdMenu == MiLcdMenu.Main) return MainDockItemVisible() ? 4 : 3;
+    if (miLcdMenu == MiLcdMenu.Main) return 4;
     if (miLcdMenu == MiLcdMenu.BehaviorSettings) return 8;
     if (miLcdMenu == MiLcdMenu.RecordPath) return 5;
     if (miLcdMenu == MiLcdMenu.SetMinePose) return 3;
@@ -745,6 +745,8 @@ void MoveMinerCursor(int delta)
 
 bool IsMinerMenuIndexEnabled(int index)
 {
+    if (miLcdMenu == MiLcdMenu.Main && index == 1)
+        return MainDockItemVisible();
     if (miLcdMenu == MiLcdMenu.AdjustExcavationZone && index == 1)
         return mineAreaAdjustmentDirty;
     if (miLcdMenu == MiLcdMenu.FollowPath && index == GetFollowPathAppendIndex())
@@ -756,7 +758,6 @@ void SelectMinerCursor()
 {
     if (miLcdMenu == MiLcdMenu.Main)
     {
-        bool dockVisible = MainDockItemVisible();
         if (miMenuIndex == 0)
         {
             if (pathMode)
@@ -773,7 +774,7 @@ void SelectMinerCursor()
             miMenuIndex = 1;
             return;
         }
-        if (dockVisible && miMenuIndex == 1)
+        if (miMenuIndex == 1 && MainDockItemVisible())
         {
             if (IsMinerDocked())
                 StartUndock();
@@ -781,13 +782,12 @@ void SelectMinerCursor()
                 StartManualDock();
             return;
         }
-        int behaviorIndex = dockVisible ? 2 : 1;
-        if (miMenuIndex == behaviorIndex)
+        if (miMenuIndex == 2)
         {
             OpenMinerMenu(MiLcdMenu.BehaviorSettings);
             miMenuIndex = 1;
         }
-        else
+        else if (miMenuIndex == 3)
             OpenMinerMenu(MiLcdMenu.Info);
         return;
     }
@@ -1059,15 +1059,84 @@ void AppendMinerHeader(StringBuilder sb)
     sb.Append(" EMM-A Miner | ");
     if (miLcdMenu == MiLcdMenu.RecordPath ||
         miLcdMenu == MiLcdMenu.SetMinePose ||
-        miLcdMenu == MiLcdMenu.SetCornerA ||
-        miLcdMenu == MiLcdMenu.MineArea ||
-        miLcdMenu == MiLcdMenu.ConfirmExcavationZone ||
-        miLcdMenu == MiLcdMenu.AdjustExcavationZone ||
-        miLcdMenu == MiLcdMenu.SetAdjustCorner)
+        miLcdMenu == MiLcdMenu.SetCornerA)
         sb.AppendLine(pathRecordCounter.ToString("000"));
+    else if (miLcdMenu == MiLcdMenu.MineArea ||
+             miLcdMenu == MiLcdMenu.ConfirmExcavationZone ||
+             miLcdMenu == MiLcdMenu.AdjustExcavationZone ||
+             miLcdMenu == MiLcdMenu.SetAdjustCorner)
+        sb.AppendLine(GetMineAreaLaneHeaderText());
     else
         sb.AppendLine(autopilotEnabled ? "On" : "Off");
     sb.AppendLine("—————————————————");
+}
+
+string GetMineAreaLaneHeaderText()
+{
+    int total = GetMineAreaLaneHeaderTotal();
+    if (total <= 0)
+        return pathRecordCounter.ToString("000");
+
+    int lane = GetMineAreaLaneHeaderCurrent(total);
+    return lane.ToString() + "/" + total.ToString();
+}
+
+int GetMineAreaLaneHeaderTotal()
+{
+    if (areaLaneCount > 0)
+        return areaLaneCount;
+    if (areaPlanRows > 0 && areaPlanCols > 0)
+        return areaPlanRows * areaPlanCols;
+
+    int total;
+    if (TryEstimateMineAreaLaneCount(pathRecordMineCornerA, pathRecordMineCornerB, pathRecordMineUp, pathRecordMineForward, out total))
+        return total;
+    if (TryEstimateMineAreaLaneCount(areaPlanCornerA, areaPlanCornerB, areaPlanUp, areaPlanForward, out total))
+        return total;
+    return 0;
+}
+
+int GetMineAreaLaneHeaderCurrent(int total)
+{
+    if (total <= 0)
+        return 0;
+    if (pathRecordMineConfirmPending && areaLaneCount <= 0)
+        return total;
+
+    int completed = areaLaneIndex;
+    if (miningState == MiningState.Backout ||
+        finishAreaAfterBackout ||
+        mineAreaAdjustStage != MineAreaAdjustStage.None ||
+        mineAreaAdjustPendingAfterBackout)
+        completed = areaLaneIndex + 1;
+
+    if (completed < 0)
+        completed = 0;
+    if (completed > total)
+        completed = total;
+    return completed;
+}
+
+bool TryEstimateMineAreaLaneCount(Vector3D cornerA, Vector3D cornerB, Vector3D up, Vector3D forward, out int total)
+{
+    total = 0;
+    if ((cornerB - cornerA).LengthSquared() <= 0.01 || up.LengthSquared() <= 0.001 || forward.LengthSquared() <= 0.001)
+        return false;
+
+    Vector3D upN = Vector3D.Normalize(up);
+    Vector3D forwardN = Vector3D.Normalize(forward);
+    Vector3D right = Vector3D.Cross(forwardN, upN);
+    if (right.LengthSquared() <= 0.001 || MINEH <= 0 || MINEW <= 0)
+        return false;
+
+    right = Vector3D.Normalize(right);
+    Vector3D delta = cornerB - cornerA;
+    double height = Math.Abs(Vector3D.Dot(delta, -upN));
+    double width = Math.Abs(Vector3D.Dot(delta, right));
+    int rows = Math.Max(1, (int)Math.Ceiling(height / MINEH));
+    int cols = Math.Max(1, (int)Math.Ceiling(width / MINEW));
+    total = rows * cols;
+    return total > 0;
 }
 
 void AppendMinerRows(StringBuilder sb)
@@ -1078,8 +1147,10 @@ void AppendMinerRows(StringBuilder sb)
         bool dockVisible = MainDockItemVisible();
         if (dockVisible)
             AppendMinerMenuRow(sb, IsMinerDocked() ? "Undock" : "Dock", 1, false);
-        AppendMinerMenuRow(sb, "Behavior settings", dockVisible ? 2 : 1, false);
-        AppendMinerMenuRow(sb, "Info", dockVisible ? 3 : 2, false);
+        else
+            sb.AppendLine();
+        AppendMinerMenuRow(sb, "Behavior settings", 2, false);
+        AppendMinerMenuRow(sb, "Info", 3, false);
         return;
     }
 
@@ -1225,12 +1296,11 @@ string GetMinerFooterInfo()
 {
     if (miLcdMenu == MiLcdMenu.Main)
     {
-        bool dockVisible = MainDockItemVisible();
         if (miMenuIndex == 0) return pathMode ? "Open path follow tools." : "Open path recording tools.";
-        if (dockVisible && miMenuIndex == 1)
+        if (miMenuIndex == 1 && MainDockItemVisible())
             return IsMinerDocked() ? "Start undocking." : "Start docking.";
-        if (miMenuIndex == (dockVisible ? 2 : 1)) return "Adjust miner behavior.";
-        if (miMenuIndex == (dockVisible ? 3 : 2)) return "Show miner stats.";
+        if (miMenuIndex == 2) return "Adjust miner behavior.";
+        if (miMenuIndex == 3) return "Show miner stats.";
     }
     if (miMenuIndex == 0)
         return "Return to EMM-A main menu.";
