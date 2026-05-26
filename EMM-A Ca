@@ -1082,6 +1082,10 @@ void AppendCarrierRows(StringBuilder sb)
         sb.AppendLine();
         AppendCarrierThrustStepRow(sb);
         AppendCarrierThrustUseRow(sb);
+        if (caMenuIndex == 2 && caEditingValue && caEditingIndex == 11)
+        {
+            AppendCarrierThrustDirectionPercentRows(sb);
+        }
         if (caMenuIndex == 4)
         {
             sb.Append("   EMM-A keeps ");
@@ -1095,6 +1099,7 @@ void AppendCarrierRows(StringBuilder sb)
     if (caLcdMenu == CaLcdMenu.BehaviorSettings)
     {
         AppendCarrierMenuRow(sb, "Next page " + (caBehaviorPage + 1) + "/3", 1, false);
+        sb.AppendLine();
         if (caBehaviorPage == 0)
         {
             AppendCarrierBehaviorValueRow(sb, "Short range max speed", 1, 2, " m/s", "0");
@@ -1517,6 +1522,16 @@ void AppendCarrierThrustUseRow(StringBuilder sb)
     sb.AppendLine();
 }
 
+void AppendCarrierThrustDirectionPercentRows(StringBuilder sb)
+{
+    MatrixD m = rc == null ? _tickRcMatrix : rc.WorldMatrix;
+    double limitN = Math.Max(1, GetCarrierThrustLimitEditKn()) * 1000.0;
+    sb.Append("   % of FWD Thrust: ");
+    sb.AppendLine(FormatThrustRatioPercent(limitN, GetEffectiveThrustInDirection(m.Forward)));
+    sb.Append("   % of BWD Thrust: ");
+    sb.AppendLine(FormatThrustRatioPercent(limitN, GetEffectiveThrustInDirection(m.Backward)));
+}
+
 int GetCarrierBehaviorSettingIndexForRow(int rowIndex)
 {
     if (rowIndex < 2)
@@ -1724,6 +1739,13 @@ string FormatWholeNumberWithCommas(double value)
 string FormatPercent(double value)
 {
     return Math.Round(value, 1).ToString("0.#").Replace(',', '.') + "%";
+}
+
+string FormatThrustRatioPercent(double limitN, double availableN)
+{
+    if (availableN <= 0)
+        return "---";
+    return Math.Round(limitN / availableN * 100.0).ToString("0") + "%";
 }
 
 int CountLines(StringBuilder sb)
