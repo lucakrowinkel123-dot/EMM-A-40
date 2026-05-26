@@ -34,6 +34,10 @@
 // MINEH <value> : sets miner lane height footprint (m)
 // MINEW <value> : sets miner lane width footprint (m)
 // DEPTHMODE <DEFAULT|ORE|ORESTONE> : depth behavior (fixed depth, auto stop on ore depletion, auto incl. stone)
+// AUTOSERVICE <ON|OFF> : toggles automatic return-to-carrier service during path playback
+// AUTOCARGO <percent> : cargo fill percent that triggers automatic service return
+// AUTOHYDRO <percent> : hydrogen percent that triggers automatic service return
+// AUTORESUMEHYDRO <percent> : hydrogen percent required before automatic service undocks again
 // TOFF r,u,f : sets target offset in local Right,Up,Forward meters
 // TOFFRESET : clears target offset
 // =====================================
@@ -90,6 +94,12 @@ double dockPoseFreshSeconds = 5.0;
 double dockConnectDistance = 0.25;
 double dockConnectAlignToleranceDeg = 0.5;
 double carrierPoseForwardOffset = -1.25; // broadcaster sends connector position shifted forward by this amount
+bool autoServiceReturnEnabled = true;
+double autoServiceCargoTriggerPercent = 90.0;
+double autoServiceHydrogenTriggerPercent = 20.0;
+double autoServiceHydrogenResumePercent = 85.0;
+double autoServiceCargoResumePercent = 1.0;
+int autoServiceCheckIntervalTicks = 300;
 // =============================================
 
 IMyShipController rc;
@@ -240,6 +250,25 @@ List<int> recallDisplayDone = new List<int>();
 int recallIndex = 0;
 int recallLastDone = 0;
 int recallLastTotal = 0;
+enum AutoServiceState
+{
+    None,
+    Returning,
+    WaitingService,
+    Undocking
+}
+AutoServiceState autoServiceState = AutoServiceState.None;
+string autoServiceReason = "";
+bool autoServiceResumePathTimer = false;
+bool autoServiceResumeMineArea = false;
+int autoServiceResumeMineAreaRecordIndex = -1;
+int autoServiceResumeAreaLaneIndex = 0;
+Vector3D autoServiceResumeMineEntryPos = Vector3D.Zero;
+Vector3D autoServiceResumeMineEntryForward = Vector3D.Zero;
+Vector3D autoServiceResumeMineEntryUp = Vector3D.Zero;
+int autoServiceCheckTicks = 0;
+int autoServiceActionRetryTicks = 0;
+const int autoServiceActionRetryIntervalTicks = 300;
 Vector3D stuckSamplePos = Vector3D.Zero;
 double stuckNoMoveSeconds = 0;
 int stuckRetryCount = 0;
@@ -339,6 +368,7 @@ const int oreTransferStartDelayAfterDockTicks = 30;
 List<IMyTerminalBlock> _oreTransferSources = new List<IMyTerminalBlock>();
 List<IMyTerminalBlock> _oreTransferTargets = new List<IMyTerminalBlock>();
 List<MyInventoryItem> _oreTransferItems = new List<MyInventoryItem>();
+List<IMyTerminalBlock> _autoServiceCargoBlocks = new List<IMyTerminalBlock>();
 bool saveAsteroidAfterDock = false;
 bool updateAsteroidAfterDock = false;
 double cachedShipHeight = 0;
@@ -537,6 +567,7 @@ public void Main (string argument, UpdateType updateSource)
         bool usedAdjustLock = UpdateMineAreaAdjustState();
         bool usedSoftLock = usedAdjustLock ? true : (reverseActive ? false : UpdatePathRecordState());
 
+        UpdateAutoServiceReturn();
         if (autopilotEnabled && hasTarget)
             Move();
         else if (!usedSoftLock)
@@ -1286,6 +1317,8 @@ void AppendMinerRows(StringBuilder sb)
         sb.AppendLine("   Ship width: " + cachedShipWidth.ToString("0.0") + "m");
         sb.AppendLine("   Ship length: " + cachedShipLength.ToString("0.0") + "m");
         sb.AppendLine("   Hydrogen: " + GetMinerHydrogenPercent().ToString("0.0") + "%");
+        sb.AppendLine("   Cargo: " + GetMinerCargoFillPercent().ToString("0.0") + "%");
+        sb.AppendLine("   Auto service: " + (autoServiceReturnEnabled ? "On" : "Off"));
     }
 }
 
@@ -1560,6 +1593,41 @@ double GetMinerHydrogenPercent()
     return count == 0 ? 0 : (filled / count) * 100.0;
 }
 
+bool HasMinerHydrogenTank()
+{
+    foreach (var tank in hydrogenTanks)
+        if (tank != null && HasMinerTag(tank))
+            return true;
+    return false;
+}
+
+double GetMinerCargoFillPercent()
+{
+    _autoServiceCargoBlocks.Clear();
+    GridTerminalSystem.GetBlocksOfType(_autoServiceCargoBlocks, b =>
+        b.HasInventory &&
+        b.CustomName.IndexOf(minerContainerTag, StringComparison.OrdinalIgnoreCase) >= 0);
+
+    double current = 0;
+    double max = 0;
+    foreach (var block in _autoServiceCargoBlocks)
+    {
+        if (block == null || !block.IsFunctional)
+            continue;
+
+        for (int i = 0; i < block.InventoryCount; i++)
+        {
+            IMyInventory inv = block.GetInventory(i);
+            if (inv == null)
+                continue;
+            current += (double)inv.CurrentVolume;
+            max += (double)inv.MaxVolume;
+        }
+    }
+
+    return max <= 0 ? 0 : MathHelper.Clamp(current / max * 100.0, 0, 100);
+}
+
 void RefreshTickPose()
 {
     _tickRcMatrix = rc.WorldMatrix;
@@ -1800,6 +1868,19 @@ bool TrySetPositiveDouble(string cmd, int skip, ref double field, string label, 
     return false;
 }
 
+bool TrySetPercentDouble(string cmd, int skip, ref double field, string label)
+{
+    double v;
+    if (double.TryParse(cmd.Substring(skip).Trim(), out v) && v >= 0 && v <= 100)
+    {
+        field = v;
+        Echo(label + " set to " + field.ToString("0.0") + "%");
+        return true;
+    }
+    Echo("Invalid " + label + " value. Use 0-100.");
+    return false;
+}
+
 void RemoteCommand (string command)
 {
     if (string.IsNullOrWhiteSpace(command))
@@ -1858,6 +1939,36 @@ void RemoteCommand (string command)
             return;
         }
         Echo($"DEPTHMODE set to {depthMode}");
+        return;
+    }
+    if (trimmed.StartsWith("AUTOSERVICE ", StringComparison.OrdinalIgnoreCase))
+    {
+        string mode = trimmed.Substring(12).Trim().ToUpperInvariant();
+        if (mode == "ON" || mode == "TRUE" || mode == "1")
+            autoServiceReturnEnabled = true;
+        else if (mode == "OFF" || mode == "FALSE" || mode == "0")
+            autoServiceReturnEnabled = false;
+        else
+        {
+            Echo("Invalid AUTOSERVICE. Use ON or OFF.");
+            return;
+        }
+        Echo("AUTOSERVICE " + (autoServiceReturnEnabled ? "ON" : "OFF"));
+        return;
+    }
+    if (trimmed.StartsWith("AUTOCARGO ", StringComparison.OrdinalIgnoreCase))
+    {
+        TrySetPercentDouble(trimmed, 10, ref autoServiceCargoTriggerPercent, "AUTOCARGO");
+        return;
+    }
+    if (trimmed.StartsWith("AUTOHYDRO ", StringComparison.OrdinalIgnoreCase))
+    {
+        TrySetPercentDouble(trimmed, 10, ref autoServiceHydrogenTriggerPercent, "AUTOHYDRO");
+        return;
+    }
+    if (trimmed.StartsWith("AUTORESUMEHYDRO ", StringComparison.OrdinalIgnoreCase))
+    {
+        TrySetPercentDouble(trimmed, 16, ref autoServiceHydrogenResumePercent, "AUTORESUMEHYDRO");
         return;
     }
     if (trimmed.StartsWith("TOFF ", StringComparison.OrdinalIgnoreCase))
@@ -2005,6 +2116,7 @@ void RemoteCommand (string command)
             ClearPathRecordMineGyroOverride();
             ClearPathRecordReverseState();
             ClearRecallState();
+            ClearAutoServiceState();
             oreTransferActive = false;
             oreTransferStartDelayTicks = 0;
             dockingState = DockingState.None;
@@ -3186,6 +3298,7 @@ void UpdatePathRunner()
 void StopPathExecution()
 {
     ClearRecallState();
+    ClearAutoServiceState();
     pathMode = false;
     pathPaused = false;
     pathPausedNavResume = false;
@@ -3927,6 +4040,12 @@ string NormalizePathRecord(string rawRecord)
 
 void CompleteRecallPath()
 {
+    if (autoServiceState == AutoServiceState.Returning)
+    {
+        CompleteAutoServiceRecall();
+        return;
+    }
+
     SendRecallProgress(recallLastTotal, recallLastTotal);
     StopPathRunTimer();
     pathMode = false;
@@ -3966,6 +4085,279 @@ void SendRecallProgress(int done, int total)
     if (total > 0)
         done = Math.Min(done, total);
     IGC.SendBroadcastMessage(minerProgressTag, "progress:" + done + "/" + total);
+}
+
+void UpdateAutoServiceReturn()
+{
+    if (autoServiceState != AutoServiceState.None)
+    {
+        UpdateAutoServiceState();
+        return;
+    }
+
+    if (!ShouldCheckAutoServiceReturn())
+        return;
+
+    if (autoServiceCheckTicks > 0)
+    {
+        autoServiceCheckTicks = Math.Max(0, autoServiceCheckTicks - UpdateTickDelta());
+        return;
+    }
+    autoServiceCheckTicks = Math.Max(1, autoServiceCheckIntervalTicks);
+
+    double cargoPercent = GetMinerCargoFillPercent();
+    if (cargoPercent >= autoServiceCargoTriggerPercent)
+    {
+        StartAutoServiceReturn("cargo " + cargoPercent.ToString("0.0") + "%");
+        return;
+    }
+
+    if (HasMinerHydrogenTank())
+    {
+        double hydrogenPercent = GetMinerHydrogenPercent();
+        if (hydrogenPercent <= autoServiceHydrogenTriggerPercent)
+            StartAutoServiceReturn("hydrogen " + hydrogenPercent.ToString("0.0") + "%");
+    }
+}
+
+bool ShouldCheckAutoServiceReturn()
+{
+    return autoServiceReturnEnabled &&
+           pathMode &&
+           pathRecords.Count > 0 &&
+           !pathPaused &&
+           !recallActive &&
+           dockingState == DockingState.None &&
+           !dockRetryPending &&
+           !pathDockPending &&
+           !pathRecordingEnabled &&
+           !appendPathActive &&
+           !IsMinerDocked() &&
+           !IsMergerDocked() &&
+           oreTransferStartDelayTicks <= 0 &&
+           !oreTransferActive;
+}
+
+void StartAutoServiceReturn(string reason)
+{
+    if (!ShouldCheckAutoServiceReturn())
+        return;
+
+    autoServiceState = AutoServiceState.Returning;
+    autoServiceReason = reason;
+    autoServiceResumePathTimer = pathRunTimerActive;
+    autoServiceResumeMineArea =
+        areaMiningMode &&
+        activeMineAreaRecordIndex >= 0 &&
+        activeMineAreaRecordIndex < pathRecords.Count;
+    autoServiceResumeMineAreaRecordIndex = autoServiceResumeMineArea ? activeMineAreaRecordIndex : -1;
+    autoServiceResumeAreaLaneIndex = autoServiceResumeMineArea ? Math.Max(0, areaLaneIndex) : 0;
+    autoServiceResumeMineEntryPos = autoServiceResumeMineArea ? areaMineEntryPos : Vector3D.Zero;
+    autoServiceResumeMineEntryForward = autoServiceResumeMineArea ? areaMineEntryForward : Vector3D.Zero;
+    autoServiceResumeMineEntryUp = autoServiceResumeMineArea ? areaMineEntryUp : Vector3D.Zero;
+    autoServiceActionRetryTicks = 0;
+    saveAsteroidAfterDock = false;
+    updateAsteroidAfterDock = false;
+    fullStateDirty = true;
+
+    StartRecallPath();
+    if (!recallActive)
+    {
+        ClearAutoServiceState();
+        return;
+    }
+
+    Echo("Auto service: returning for " + autoServiceReason + ".");
+}
+
+void UpdateAutoServiceState()
+{
+    if (autoServiceState == AutoServiceState.Returning)
+    {
+        if (recallActive)
+            return;
+        if (IsMinerDocked() || IsMergerDocked())
+        {
+            CompleteAutoServiceRecall();
+            return;
+        }
+        ClearAutoServiceState();
+        return;
+    }
+
+    if (autoServiceState == AutoServiceState.WaitingService)
+    {
+        if (!IsMinerDocked() && !IsMergerDocked())
+        {
+            RetryAutoServiceDock();
+            return;
+        }
+
+        if (oreTransferStartDelayTicks > 0 || oreTransferActive)
+            return;
+
+        double cargoPercent = GetMinerCargoFillPercent();
+        double hydrogenPercent = HasMinerHydrogenTank() ? GetMinerHydrogenPercent() : 100.0;
+        if (cargoPercent > autoServiceCargoResumePercent ||
+            hydrogenPercent < autoServiceHydrogenResumePercent)
+            return;
+
+        RetryAutoServiceUndock();
+        return;
+    }
+
+    if (autoServiceState == AutoServiceState.Undocking)
+    {
+        if (dockingState != DockingState.None)
+            return;
+        if (IsMinerDocked() || IsMergerDocked())
+        {
+            RetryAutoServiceUndock();
+            return;
+        }
+
+        autoServiceState = AutoServiceState.None;
+        autoServiceReason = "";
+        autoServiceActionRetryTicks = 0;
+        pathPaused = false;
+        pathPausedNavResume = false;
+        if (autoServiceResumePathTimer && pathRunTimerStarted)
+            pathRunTimerActive = true;
+        if (autoServiceResumeMineArea && ResumeAutoServiceMineArea())
+        {
+            ClearAutoServiceResumeTarget();
+            autoServiceResumePathTimer = false;
+            fullStateDirty = true;
+            Echo("Auto service: resumed excavation zone.");
+            return;
+        }
+        ClearAutoServiceResumeTarget();
+        autoServiceResumePathTimer = false;
+        fullStateDirty = true;
+        Echo("Auto service: resumed path.");
+    }
+}
+
+void RetryAutoServiceDock()
+{
+    if (dockingState != DockingState.None || dockRetryPending)
+        return;
+    if (autoServiceActionRetryTicks > 0)
+    {
+        autoServiceActionRetryTicks = Math.Max(0, autoServiceActionRetryTicks - UpdateTickDelta());
+        return;
+    }
+    autoServiceActionRetryTicks = autoServiceActionRetryIntervalTicks;
+    StartDock();
+}
+
+void RetryAutoServiceUndock()
+{
+    if (dockingState != DockingState.None)
+        return;
+    if (autoServiceActionRetryTicks > 0)
+    {
+        autoServiceActionRetryTicks = Math.Max(0, autoServiceActionRetryTicks - UpdateTickDelta());
+        return;
+    }
+    autoServiceActionRetryTicks = autoServiceActionRetryIntervalTicks;
+    StartUndock();
+    if (dockingState != DockingState.None)
+    {
+        autoServiceState = AutoServiceState.Undocking;
+        fullStateDirty = true;
+        Echo("Auto service: service complete, undocking.");
+    }
+}
+
+void CompleteAutoServiceRecall()
+{
+    SendRecallProgress(recallLastTotal, recallLastTotal);
+    StopPathRunTimer();
+    pathPaused = true;
+    pathPausedNavResume = false;
+    pathCompleteBroadcastTicks = 0;
+    saveAsteroidAfterDock = false;
+    updateAsteroidAfterDock = false;
+    recallActive = false;
+    recallWaitingForAreaExit = false;
+    recallWaitingForDock = false;
+    recallRecords.Clear();
+    recallDisplayDone.Clear();
+    recallIndex = 0;
+    autoServiceState = AutoServiceState.WaitingService;
+    autoServiceActionRetryTicks = 0;
+    fullStateDirty = true;
+    if (oreTransferStartDelayTicks <= 0 && !oreTransferActive)
+        ScheduleOreTransfer();
+    Echo("Auto service: docked, unloading and refueling.");
+}
+
+bool ResumeAutoServiceMineArea()
+{
+    if (!autoServiceResumeMineArea ||
+        autoServiceResumeMineAreaRecordIndex < 0 ||
+        autoServiceResumeMineAreaRecordIndex >= pathRecords.Count)
+        return false;
+
+    string record = NormalizePathRecord(pathRecords[autoServiceResumeMineAreaRecordIndex]);
+    if (string.IsNullOrWhiteSpace(record))
+        return false;
+
+    activeMineAreaRecordIndex = autoServiceResumeMineAreaRecordIndex;
+    activeMineAreaRecordLine = record;
+    int startLane = Math.Max(0, autoServiceResumeAreaLaneIndex);
+
+    if (record.StartsWith("minearea;", StringComparison.OrdinalIgnoreCase))
+    {
+        if (!TryStartAreaMiningCommandFromLane(record, startLane))
+            return false;
+        RestoreAutoServiceMineEntry();
+        return miningEnabled;
+    }
+
+    if (!pathAnchorValid || !LineLooksLikeMineArea(record))
+        return false;
+
+    Vector3D cornerA, cornerB, areaUp, areaForward;
+    double depth;
+    if (!TryParseMineAreaLine(record, pathAnchorPos,
+                              out cornerA, out cornerB, out areaUp, out areaForward, out depth))
+        return false;
+
+    StartAreaMiningWithCornersFromLane(cornerA, cornerB, areaUp, areaForward, depth, startLane);
+    RestoreAutoServiceMineEntry();
+    return miningEnabled;
+}
+
+void RestoreAutoServiceMineEntry()
+{
+    if (autoServiceResumeMineEntryForward.LengthSquared() <= 0.001 ||
+        autoServiceResumeMineEntryUp.LengthSquared() <= 0.001)
+        return;
+
+    areaMineEntryPos = autoServiceResumeMineEntryPos;
+    areaMineEntryForward = autoServiceResumeMineEntryForward;
+    areaMineEntryUp = autoServiceResumeMineEntryUp;
+}
+
+void ClearAutoServiceState()
+{
+    autoServiceState = AutoServiceState.None;
+    autoServiceReason = "";
+    autoServiceResumePathTimer = false;
+    autoServiceActionRetryTicks = 0;
+    ClearAutoServiceResumeTarget();
+}
+
+void ClearAutoServiceResumeTarget()
+{
+    autoServiceResumeMineArea = false;
+    autoServiceResumeMineAreaRecordIndex = -1;
+    autoServiceResumeAreaLaneIndex = 0;
+    autoServiceResumeMineEntryPos = Vector3D.Zero;
+    autoServiceResumeMineEntryForward = Vector3D.Zero;
+    autoServiceResumeMineEntryUp = Vector3D.Zero;
 }
 
 void UpdateDockPoseFromBroadcast()
@@ -4646,6 +5038,7 @@ bool TryTransferStackOrPartial(IMyInventory src, IMyInventory tgtInv, int itemId
 void StartPathFromTimer()
 {
     ClearRecallState();
+    ClearAutoServiceState();
     List<string> loaded;
     string timerName;
     if (!TryLoadPathRecordsFromTimer(out loaded, out timerName))
@@ -4977,12 +5370,17 @@ void StartSingleLaneMining(string command)
 
 void StartAreaMining(string command)
 {
+    TryStartAreaMiningCommandFromLane(command, 0);
+}
+
+bool TryStartAreaMiningCommandFromLane(string command, int startLane)
+{
     // minearea;<gps or x,y,z>;<gps or x,y,z>;Faceup,Faceforward;depth
     string[] args = command.Split(';');
     if (args.Length < 5)
     {
         Echo("Usage: minearea;<gps or x,y,z>;<gps or x,y,z>;Faceup,Faceforward;depth");
-        return;
+        return false;
     }
 
     Vector3D leftUpper;
@@ -4990,7 +5388,7 @@ void StartAreaMining(string command)
     if (!TryParsePoint(args[1], out leftUpper) || !TryParsePoint(args[2], out rightBottom))
     {
         Echo("Invalid point format. Use GPS:Name:X:Y:Z: or x,y,z");
-        return;
+        return false;
     }
 
     Vector3D up;
@@ -4998,20 +5396,26 @@ void StartAreaMining(string command)
     if (!TryParseAreaOrientation(args[3], leftUpper, rightBottom, out up, out forward))
     {
         Echo("Invalid orientation mode. Use Faceup,Faceforward or ux,uy,uz,fx,fy,fz");
-        return;
+        return false;
     }
 
     double depth;
     if (!double.TryParse(args[4], out depth) || depth <= 0)
     {
         Echo("Invalid depth.");
-        return;
+        return false;
     }
 
-    StartAreaMiningWithCorners(leftUpper, rightBottom, up, forward, depth);
+    StartAreaMiningWithCornersFromLane(leftUpper, rightBottom, up, forward, depth, startLane);
+    return miningEnabled;
 }
 
 void StartAreaMiningWithCorners(Vector3D cornerA, Vector3D cornerB, Vector3D up, Vector3D forward, double depth)
+{
+    StartAreaMiningWithCornersFromLane(cornerA, cornerB, up, forward, depth, 0);
+}
+
+void StartAreaMiningWithCornersFromLane(Vector3D cornerA, Vector3D cornerB, Vector3D up, Vector3D forward, double depth, int startLane)
 {
     ClearPathRecordMineBoundaryLock();
     Vector3D right = Vector3D.Cross(forward, up);
@@ -5042,7 +5446,7 @@ void StartAreaMiningWithCorners(Vector3D cornerA, Vector3D cornerB, Vector3D up,
     returnToMinePoseAfterArea = true;
 
     areaMiningMode = true;
-    areaLaneIndex = 0;
+    areaLaneIndex = Math.Max(0, Math.Min(startLane, areaLaneCount - 1));
     retryCurrentLane = false;
     finishAreaAfterBackout = false;
     stuckRetryCount = 0;
@@ -5060,7 +5464,10 @@ void StartAreaMiningWithCorners(Vector3D cornerA, Vector3D cornerB, Vector3D up,
     OpenMinerMenu(MiLcdMenu.MineArea);
     miMenuIndex = 1;
 
-    Echo($"Area mining started. Lanes={areaLaneCount}, depth={laneDepth:0.00}m");
+    if (areaLaneIndex > 0)
+        Echo($"Area mining resumed. Lane={areaLaneIndex + 1}/{areaLaneCount}, depth={laneDepth:0.00}m");
+    else
+        Echo($"Area mining started. Lanes={areaLaneCount}, depth={laneDepth:0.00}m");
 }
 
 bool TryParseAreaOrientation(string modeText, Vector3D pointA, Vector3D pointB, out Vector3D up, out Vector3D forward)
@@ -6066,6 +6473,21 @@ void SaveState()
         ini.Set(StateIniSection, "recallRecord" + i, recallRecords[i]);
         ini.Set(StateIniSection, "recallDone" + i, i < recallDisplayDone.Count ? recallDisplayDone[i] : recallLastDone);
     }
+    ini.Set(StateIniSection, "autoServiceReturnEnabled", autoServiceReturnEnabled ? "1" : "0");
+    ini.Set(StateIniSection, "autoServiceCargoTriggerPercent", autoServiceCargoTriggerPercent.ToString("R"));
+    ini.Set(StateIniSection, "autoServiceHydrogenTriggerPercent", autoServiceHydrogenTriggerPercent.ToString("R"));
+    ini.Set(StateIniSection, "autoServiceHydrogenResumePercent", autoServiceHydrogenResumePercent.ToString("R"));
+    ini.Set(StateIniSection, "autoServiceState", (int)autoServiceState);
+    ini.Set(StateIniSection, "autoServiceReason", autoServiceReason);
+    ini.Set(StateIniSection, "autoServiceResumePathTimer", autoServiceResumePathTimer ? "1" : "0");
+    ini.Set(StateIniSection, "autoServiceResumeMineArea", autoServiceResumeMineArea ? "1" : "0");
+    ini.Set(StateIniSection, "autoServiceResumeMineAreaRecordIndex", autoServiceResumeMineAreaRecordIndex);
+    ini.Set(StateIniSection, "autoServiceResumeAreaLaneIndex", autoServiceResumeAreaLaneIndex);
+    ini.Set(StateIniSection, "autoServiceResumeMineEntryPos", V3ToString(autoServiceResumeMineEntryPos));
+    ini.Set(StateIniSection, "autoServiceResumeMineEntryForward", V3ToString(autoServiceResumeMineEntryForward));
+    ini.Set(StateIniSection, "autoServiceResumeMineEntryUp", V3ToString(autoServiceResumeMineEntryUp));
+    ini.Set(StateIniSection, "autoServiceCheckTicks", autoServiceCheckTicks);
+    ini.Set(StateIniSection, "autoServiceActionRetryTicks", autoServiceActionRetryTicks);
     ini.Set(StateIniSection, "pathRecordMeters", pathRecordMeters.ToString("R"));
     ini.Set(StateIniSection, "pathRecordMineDepth", pathRecordMineDepth.ToString("R"));
     ini.Set(StateIniSection, "lcdRefreshIntervalTicks", lcdRefreshIntervalTicks);
@@ -6160,6 +6582,21 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "recallIndex", recallIndex);
     ini.Set(ProgressIniSection, "recallLastDone", recallLastDone);
     ini.Set(ProgressIniSection, "recallLastTotal", recallLastTotal);
+    ini.Set(ProgressIniSection, "autoServiceReturnEnabled", autoServiceReturnEnabled ? "1" : "0");
+    ini.Set(ProgressIniSection, "autoServiceCargoTriggerPercent", autoServiceCargoTriggerPercent.ToString("R"));
+    ini.Set(ProgressIniSection, "autoServiceHydrogenTriggerPercent", autoServiceHydrogenTriggerPercent.ToString("R"));
+    ini.Set(ProgressIniSection, "autoServiceHydrogenResumePercent", autoServiceHydrogenResumePercent.ToString("R"));
+    ini.Set(ProgressIniSection, "autoServiceState", (int)autoServiceState);
+    ini.Set(ProgressIniSection, "autoServiceReason", autoServiceReason);
+    ini.Set(ProgressIniSection, "autoServiceResumePathTimer", autoServiceResumePathTimer ? "1" : "0");
+    ini.Set(ProgressIniSection, "autoServiceResumeMineArea", autoServiceResumeMineArea ? "1" : "0");
+    ini.Set(ProgressIniSection, "autoServiceResumeMineAreaRecordIndex", autoServiceResumeMineAreaRecordIndex);
+    ini.Set(ProgressIniSection, "autoServiceResumeAreaLaneIndex", autoServiceResumeAreaLaneIndex);
+    ini.Set(ProgressIniSection, "autoServiceResumeMineEntryPos", V3ToString(autoServiceResumeMineEntryPos));
+    ini.Set(ProgressIniSection, "autoServiceResumeMineEntryForward", V3ToString(autoServiceResumeMineEntryForward));
+    ini.Set(ProgressIniSection, "autoServiceResumeMineEntryUp", V3ToString(autoServiceResumeMineEntryUp));
+    ini.Set(ProgressIniSection, "autoServiceCheckTicks", autoServiceCheckTicks);
+    ini.Set(ProgressIniSection, "autoServiceActionRetryTicks", autoServiceActionRetryTicks);
     ini.Set(ProgressIniSection, "pathRecordMeters", pathRecordMeters.ToString("R"));
     ini.Set(ProgressIniSection, "pathRecordMineDepth", pathRecordMineDepth.ToString("R"));
     ini.Set(ProgressIniSection, "cockpitGyroForcedOff", cockpitGyroControlForcedOff ? "1" : "0");
@@ -6336,6 +6773,34 @@ void LoadState()
         if (recallIndex > recallRecords.Count)
             recallIndex = recallRecords.Count;
     }
+    autoServiceReturnEnabled = StateBool(ini, "autoServiceReturnEnabled", autoServiceReturnEnabled);
+    if (double.TryParse(StateString(ini, "autoServiceCargoTriggerPercent", autoServiceCargoTriggerPercent.ToString("R")), out d))
+        autoServiceCargoTriggerPercent = MathHelper.Clamp(d, 0, 100);
+    if (double.TryParse(StateString(ini, "autoServiceHydrogenTriggerPercent", autoServiceHydrogenTriggerPercent.ToString("R")), out d))
+        autoServiceHydrogenTriggerPercent = MathHelper.Clamp(d, 0, 100);
+    if (double.TryParse(StateString(ini, "autoServiceHydrogenResumePercent", autoServiceHydrogenResumePercent.ToString("R")), out d))
+        autoServiceHydrogenResumePercent = MathHelper.Clamp(d, 0, 100);
+    if (int.TryParse(StateString(ini, "autoServiceState", ((int)autoServiceState).ToString()), out n))
+    {
+        if (n < 0 || n > (int)AutoServiceState.Undocking)
+            n = 0;
+        autoServiceState = (AutoServiceState)n;
+    }
+    autoServiceReason = StateString(ini, "autoServiceReason", autoServiceReason);
+    autoServiceResumePathTimer = StateBool(ini, "autoServiceResumePathTimer", autoServiceResumePathTimer);
+    autoServiceResumeMineArea = StateBool(ini, "autoServiceResumeMineArea", autoServiceResumeMineArea);
+    if (int.TryParse(StateString(ini, "autoServiceResumeMineAreaRecordIndex", autoServiceResumeMineAreaRecordIndex.ToString()), out n))
+        autoServiceResumeMineAreaRecordIndex = n;
+    if (int.TryParse(StateString(ini, "autoServiceResumeAreaLaneIndex", autoServiceResumeAreaLaneIndex.ToString()), out n))
+        autoServiceResumeAreaLaneIndex = Math.Max(0, n);
+    if (TryParseV3(StateString(ini, "autoServiceResumeMineEntryPos", V3ToString(autoServiceResumeMineEntryPos)), out v))
+        autoServiceResumeMineEntryPos = v;
+    if (TryParseV3(StateString(ini, "autoServiceResumeMineEntryForward", V3ToString(autoServiceResumeMineEntryForward)), out v))
+        autoServiceResumeMineEntryForward = v;
+    if (TryParseV3(StateString(ini, "autoServiceResumeMineEntryUp", V3ToString(autoServiceResumeMineEntryUp)), out v))
+        autoServiceResumeMineEntryUp = v;
+    if (int.TryParse(StateString(ini, "autoServiceCheckTicks", autoServiceCheckTicks.ToString()), out n)) autoServiceCheckTicks = Math.Max(0, n);
+    if (int.TryParse(StateString(ini, "autoServiceActionRetryTicks", autoServiceActionRetryTicks.ToString()), out n)) autoServiceActionRetryTicks = Math.Max(0, n);
     if (double.TryParse(StateString(ini, "pathRecordMeters", pathRecordMeters.ToString("R")), out d)) pathRecordMeters = d;
     if (double.TryParse(StateString(ini, "pathRecordMineDepth", pathRecordMineDepth.ToString("R")), out d)) pathRecordMineDepth = d;
     if (int.TryParse(StateString(ini, "lcdRefreshIntervalTicks", lcdRefreshIntervalTicks.ToString()), out n)) lcdRefreshIntervalTicks = Math.Max(lcdRefreshMinTicks, n);
@@ -6363,6 +6828,8 @@ void LoadState()
     RecoverDockPoseAfterLoad();
     if (recallActive && recallRecords.Count == 0 && !recallWaitingForAreaExit && !recallWaitingForDock && pathRecords.Count > 0)
         BuildRecallRecords();
+    if (autoServiceState == AutoServiceState.WaitingService || autoServiceState == AutoServiceState.Undocking)
+        pathPaused = true;
 
     // If drills were actively running when the reload happened, turn them back on
     // and reset the stuck monitor so the stuck timer starts fresh.

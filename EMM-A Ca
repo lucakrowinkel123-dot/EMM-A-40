@@ -5650,6 +5650,7 @@ void SaveState()
     ini.Set(StateIniSection, "cruiseOffsetMeters", cruiseOffsetMeters.ToString("R"));
     ini.Set(StateIniSection, "thrustLimitKn", thrustLimitKn.ToString("R"));
     ini.Set(StateIniSection, "thrustUsePercent", thrustUsePercent.ToString("R"));
+    ini.Set(StateIniSection, "caThrustStepIndex", caThrustStepIndex);
     ini.Set(StateIniSection, "accelerationLimit", accelerationLimit.ToString("R"));
     ini.Set(StateIniSection, "turnTestEnabled", turnTestEnabled ? "1" : "0");
     ini.Set(StateIniSection, "goToLeadDistanceMeters", goToLeadDistanceMeters.ToString("R"));
@@ -5818,6 +5819,7 @@ void LoadState()
     if (double.TryParse(StateString(ini, "cruiseOffsetMeters", cruiseOffsetMeters.ToString("R")), out d)) cruiseOffsetMeters = Math.Max(100, d);
     if (double.TryParse(StateString(ini, "thrustLimitKn", thrustLimitKn.ToString("R")), out d)) thrustLimitKn = Math.Max(1, d);
     if (double.TryParse(StateString(ini, "thrustUsePercent", thrustUsePercent.ToString("R")), out d)) thrustUsePercent = MathHelper.Clamp(d, 1, 100);
+    if (int.TryParse(StateString(ini, "caThrustStepIndex", caThrustStepIndex.ToString()), out n)) caThrustStepIndex = Math.Max(0, Math.Min(GetCarrierThrustStepCount() - 1, n));
     if (double.TryParse(StateString(ini, "accelerationLimit", accelerationLimit.ToString("R")), out d)) accelerationLimit = Math.Max(0.1, d);
     turnTestEnabled = StateBool(ini, "turnTestEnabled", turnTestEnabled);
     if (double.TryParse(StateString(ini, "goToLeadDistanceMeters", goToLeadDistanceMeters.ToString("R")), out d)) goToLeadDistanceMeters = d;
