@@ -1527,9 +1527,9 @@ void AppendCarrierThrustDirectionPercentRows(StringBuilder sb)
     MatrixD m = rc == null ? _tickRcMatrix : rc.WorldMatrix;
     double limitN = Math.Max(1, GetCarrierThrustLimitEditKn()) * 1000.0;
     sb.Append("   % of FWD Thrust: ");
-    sb.AppendLine(FormatThrustRatioPercent(limitN, GetEffectiveThrustInDirection(m.Forward)));
-    sb.Append("   % of BWD Thrust: ");
     sb.AppendLine(FormatThrustRatioPercent(limitN, GetEffectiveThrustInDirection(m.Backward)));
+    sb.Append("   % of BWD Thrust: ");
+    sb.AppendLine(FormatThrustRatioPercent(limitN, GetEffectiveThrustInDirection(m.Forward)));
 }
 
 int GetCarrierBehaviorSettingIndexForRow(int rowIndex)
