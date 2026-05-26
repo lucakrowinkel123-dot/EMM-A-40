@@ -207,6 +207,9 @@ bool caCursorControl = false;
 bool caEditingValue = false;
 int caEditingIndex = -1;
 double caEditValue = 0;
+double caThrustEditLimitKn = 0;
+double caThrustEditUsePercent = 0;
+int caThrustStepIndex = 5;
 bool caAuditPending = false;
 bool caAuditRunning = false;
 int caAuditDelayTicks = 0;
@@ -240,6 +243,7 @@ enum CaLcdMenu
     SelectOres,
     Audit,
     BehaviorSettings,
+    ThrustLimit,
     ResetAsteroidsConfirm,
     Info
 }
@@ -656,7 +660,8 @@ bool TryHandleCarrierLcdCommand(string trimmed)
     if (trimmed.Equals("up", StringComparison.OrdinalIgnoreCase) ||
         trimmed.Equals("w", StringComparison.OrdinalIgnoreCase))
     {
-        if (caEditingValue) AdjustCarrierEdit(1);
+        if (caEditingValue && caLcdMenu == CaLcdMenu.ThrustLimit) AdjustCarrierThrustLimitEdit(1);
+        else if (caEditingValue) AdjustCarrierEdit(1);
         else MoveCarrierCursor(-1);
         UpdateCarrierLcd();
         return true;
@@ -664,7 +669,8 @@ bool TryHandleCarrierLcdCommand(string trimmed)
     if (trimmed.Equals("down", StringComparison.OrdinalIgnoreCase) ||
         trimmed.Equals("s", StringComparison.OrdinalIgnoreCase))
     {
-        if (caEditingValue) AdjustCarrierEdit(-1);
+        if (caEditingValue && caLcdMenu == CaLcdMenu.ThrustLimit) AdjustCarrierThrustLimitEdit(-1);
+        else if (caEditingValue) AdjustCarrierEdit(-1);
         else MoveCarrierCursor(1);
         UpdateCarrierLcd();
         return true;
@@ -672,7 +678,8 @@ bool TryHandleCarrierLcdCommand(string trimmed)
     if (trimmed.Equals("apply", StringComparison.OrdinalIgnoreCase) ||
         trimmed.Equals("e", StringComparison.OrdinalIgnoreCase))
     {
-        if (caEditingValue) SaveCarrierEdit();
+        if (caEditingValue && caLcdMenu == CaLcdMenu.ThrustLimit) EndCarrierThrustLimitEdit();
+        else if (caEditingValue) SaveCarrierEdit();
         else SelectCarrierCursor();
         UpdateCarrierLcd();
         return true;
@@ -682,6 +689,8 @@ bool TryHandleCarrierLcdCommand(string trimmed)
     {
         if (caEditingValue)
             CancelCarrierEdit();
+        else if (caLcdMenu == CaLcdMenu.ThrustLimit)
+            CloseCarrierThrustLimitMenu();
         else
         {
             caLcdMenu = CaLcdMenu.Main;
@@ -708,7 +717,13 @@ int GetCarrierMenuItemCount()
     if (caLcdMenu == CaLcdMenu.Main) return 4;
     if (caLcdMenu == CaLcdMenu.AutonomousMining) return ShowRecallMinerMenuItem() ? 4 : 3;
     if (caLcdMenu == CaLcdMenu.SelectOres) return 1 + GetCarrierOreCount();
-    if (caLcdMenu == CaLcdMenu.BehaviorSettings) return 9;
+    if (caLcdMenu == CaLcdMenu.BehaviorSettings)
+    {
+        if (caBehaviorPage == 0) return 8;
+        if (caBehaviorPage == 1) return 7;
+        return 4;
+    }
+    if (caLcdMenu == CaLcdMenu.ThrustLimit) return 5;
     if (caLcdMenu == CaLcdMenu.ResetAsteroidsConfirm) return 2;
     if (caLcdMenu == CaLcdMenu.Info) return 2;
     return 1;
@@ -739,6 +754,12 @@ void SelectCarrierCursor()
         }
         else if (caMenuIndex == 3)
             OpenCarrierMenu(CaLcdMenu.Info);
+        return;
+    }
+
+    if (caLcdMenu == CaLcdMenu.ThrustLimit && caMenuIndex == 0)
+    {
+        CloseCarrierThrustLimitMenu();
         return;
     }
 
@@ -782,17 +803,35 @@ void SelectCarrierCursor()
     {
         if (caMenuIndex == 1)
         {
-            caBehaviorPage = 1 - caBehaviorPage;
+            caBehaviorPage = (caBehaviorPage + 1) % 3;
             caMenuIndex = 1;
             CancelCarrierEdit();
             return;
         }
 
         int settingIndex = GetCarrierBehaviorSettingIndexForRow(caMenuIndex);
-        if (settingIndex == 14)
+        if (settingIndex == 11)
+            OpenCarrierThrustLimitMenu();
+        else if (settingIndex == 14)
             turnTestEnabled = !turnTestEnabled;
         else if (settingIndex > 0)
             BeginCarrierEdit(settingIndex);
+        return;
+    }
+
+    if (caLcdMenu == CaLcdMenu.ThrustLimit)
+    {
+        if (caMenuIndex == 1)
+        {
+            SaveCarrierThrustLimitMenu();
+            return;
+        }
+        if (caMenuIndex == 2)
+            BeginCarrierThrustLimitEdit(11);
+        else if (caMenuIndex == 3)
+            BeginCarrierThrustLimitEdit(15);
+        else if (caMenuIndex == 4)
+            BeginCarrierThrustLimitEdit(12);
         return;
     }
 
@@ -815,6 +854,30 @@ void OpenCarrierMenu(CaLcdMenu menu)
     if (menu == CaLcdMenu.BehaviorSettings)
         caBehaviorPage = 0;
     CancelCarrierEdit();
+}
+
+void OpenCarrierThrustLimitMenu()
+{
+    caLcdMenu = CaLcdMenu.ThrustLimit;
+    caMenuIndex = 2;
+    caThrustEditLimitKn = thrustLimitKn;
+    caThrustEditUsePercent = thrustUsePercent;
+    CancelCarrierEdit();
+}
+
+void CloseCarrierThrustLimitMenu()
+{
+    caLcdMenu = CaLcdMenu.BehaviorSettings;
+    caBehaviorPage = 1;
+    caMenuIndex = 6;
+    CancelCarrierEdit();
+}
+
+void SaveCarrierThrustLimitMenu()
+{
+    thrustLimitKn = Math.Max(1, caThrustEditLimitKn);
+    thrustUsePercent = MathHelper.Clamp(caThrustEditUsePercent, 1, 100);
+    CloseCarrierThrustLimitMenu();
 }
 
 void SetFullAutoEnabledFromUi(bool enabled)
@@ -929,6 +992,10 @@ void AppendCarrierHeader(StringBuilder sb)
         sb.Append('/');
         sb.AppendLine(selected.ToString());
     }
+    else if (caLcdMenu == CaLcdMenu.ThrustLimit)
+    {
+        sb.AppendLine(" EMM-A Carrier | Thrust limit");
+    }
     else
     {
         sb.Append(" EMM-A Carrier | ");
@@ -1007,9 +1074,27 @@ void AppendCarrierRows(StringBuilder sb)
         return;
     }
 
+    if (caLcdMenu == CaLcdMenu.ThrustLimit)
+    {
+        AppendCarrierMenuRow(sb, "Save", 1, false);
+        sb.AppendLine();
+        AppendCarrierThrustLimitValueRow(sb);
+        sb.AppendLine();
+        AppendCarrierThrustStepRow(sb);
+        AppendCarrierThrustUseRow(sb);
+        if (caMenuIndex == 4)
+        {
+            sb.Append("   EMM-A keeps ");
+            sb.Append(FormatPercent(Math.Max(0, 100 - GetCarrierThrustUseEditPercent())));
+            sb.AppendLine(" of allowed ");
+            sb.AppendLine("   thrust as overhead. ");
+        }
+        return;
+    }
+
     if (caLcdMenu == CaLcdMenu.BehaviorSettings)
     {
-        AppendCarrierMenuRow(sb, "Next page " + (caBehaviorPage + 1) + "/2", 1, false);
+        AppendCarrierMenuRow(sb, "Next page " + (caBehaviorPage + 1) + "/3", 1, false);
         if (caBehaviorPage == 0)
         {
             AppendCarrierBehaviorValueRow(sb, "Short range max speed", 1, 2, " m/s", "0");
@@ -1018,17 +1103,19 @@ void AppendCarrierRows(StringBuilder sb)
             AppendCarrierBehaviorValueRow(sb, "Bubble radius", 4, 5, " m", "0");
             AppendCarrierBehaviorValueRow(sb, "Fullauto retry", 5, 6, " ticks", "0");
             AppendCarrierBehaviorValueRow(sb, "Approach distance", 6, 7, " m", "0");
-            AppendCarrierBehaviorValueRow(sb, "LCD refresh", 7, 8, " ticks", "0");
+        }
+        else if (caBehaviorPage == 1)
+        {
+            AppendCarrierBehaviorValueRow(sb, "LCD refresh", 7, 2, " ticks", "0");
+            AppendCarrierBehaviorValueRow(sb, "Asteroids Safety Check", 8, 3, "/tick", "0");
+            AppendCarrierBehaviorValueRow(sb, "Short range", 9, 4, " m", "0");
+            AppendCarrierBehaviorValueRow(sb, "Cruise offset", 10, 5, " m", "0");
+            AppendCarrierBehaviorThrustLimitRow(sb, 6);
         }
         else
         {
-            AppendCarrierBehaviorValueRow(sb, "Asteroids Safety Check", 8, 2, "/tick", "0");
-            AppendCarrierBehaviorValueRow(sb, "Short range", 9, 3, " m", "0");
-            AppendCarrierBehaviorValueRow(sb, "Cruise offset", 10, 4, " m", "0");
-            AppendCarrierBehaviorValueRow(sb, "Thrust limit", 11, 5, " kN", "0");
-            AppendCarrierBehaviorValueRow(sb, "Thrust use", 12, 6, "%", "0");
-            AppendCarrierBehaviorValueRow(sb, "Acceleration limit", 13, 7, " m/s2", "0.0");
-            AppendCarrierBehaviorToggleRow(sb, "Turn test [" + (turnTestEnabled ? "On" : "Off") + "]", 14, 8);
+            AppendCarrierBehaviorValueRow(sb, "Acceleration limit", 13, 2, " m/s2", "0.0");
+            AppendCarrierBehaviorToggleRow(sb, "Turn test [" + (turnTestEnabled ? "On" : "Off") + "]", 14, 3);
         }
         return;
     }
@@ -1203,7 +1290,7 @@ string GetCarrierFooterInfo()
         if (caMenuIndex == 2) return "Adjust carrier behavior.";
         if (caMenuIndex == 3) return "Show carrier stats.";
     }
-    if (caMenuIndex == 0)
+    if (caMenuIndex == 0 && caLcdMenu != CaLcdMenu.ThrustLimit)
         return "Return to EMM-A main menu.";
     if (caLcdMenu == CaLcdMenu.AutonomousMining)
     {
@@ -1229,6 +1316,16 @@ string GetCarrierFooterInfo()
         if (settingIndex == 12) return "Set normal thrust budget.";
         if (settingIndex == 13) return "Set acceleration cap.";
         if (settingIndex == 14) return "Test turn rate before cruise.";
+    }
+    if (caLcdMenu == CaLcdMenu.ThrustLimit)
+    {
+        if (caMenuIndex == 0) return "Revert and exit.";
+        if (caMenuIndex == 1) return "Save and exit.";
+        if (caMenuIndex == 2 && caEditingValue && caEditingIndex == 11)
+            return "Detected Max: " + FormatCompactThrustN(GetDetectedMaxCarrierThrustN());
+        if (caMenuIndex == 2) return "Set total thrust ceiling.";
+        if (caMenuIndex == 3) return "Select stepsize.";
+        if (caMenuIndex == 4) return "Set normal thrust budget.";
     }
     if (caLcdMenu == CaLcdMenu.SelectOres && caMenuIndex > 0)
         return "Toggle this ore target.";
@@ -1373,11 +1470,67 @@ void AppendCarrierBehaviorToggleRow(StringBuilder sb, string label, int settingI
     sb.AppendLine(label);
 }
 
+void AppendCarrierBehaviorThrustLimitRow(StringBuilder sb, int rowIndex)
+{
+    bool selected = caMenuIndex == rowIndex;
+    sb.Append(selected ? "> " : "-  ");
+    sb.AppendLine("Thrust limit:");
+    sb.Append("   ");
+    sb.Append(FormatWholeNumberWithCommas(thrustLimitKn));
+    sb.AppendLine(" kN");
+}
+
+void AppendCarrierThrustLimitValueRow(StringBuilder sb)
+{
+    bool selected = caMenuIndex == 2;
+    bool editSelected = caEditingValue && selected && caEditingIndex == 11;
+    if (selected)
+        sb.Append(editSelected ? "< " : "> ");
+    else
+        sb.Append("-  ");
+    sb.Append(FormatWholeNumberWithCommas(GetCarrierThrustLimitEditKn()));
+    sb.AppendLine(" kN");
+}
+
+void AppendCarrierThrustStepRow(StringBuilder sb)
+{
+    bool selected = caMenuIndex == 3;
+    bool editSelected = caEditingValue && selected && caEditingIndex == 15;
+    if (selected)
+        sb.Append(editSelected ? "< " : "> ");
+    else
+        sb.Append("-  ");
+    sb.Append("Step: ");
+    sb.AppendLine(GetCarrierThrustStepLabel(GetCarrierThrustStepEditIndex()));
+}
+
+void AppendCarrierThrustUseRow(StringBuilder sb)
+{
+    bool selected = caMenuIndex == 4;
+    bool editSelected = caEditingValue && selected && caEditingIndex == 12;
+    if (selected)
+        sb.Append(editSelected ? "< " : "> ");
+    else
+        sb.Append("-  ");
+    sb.Append("Thrust use: ");
+    sb.Append(FormatPercent(GetCarrierThrustUseEditPercent()));
+    sb.AppendLine();
+}
+
 int GetCarrierBehaviorSettingIndexForRow(int rowIndex)
 {
-    if (rowIndex < 2 || rowIndex > 8)
+    if (rowIndex < 2)
         return -1;
-    return caBehaviorPage == 0 ? rowIndex - 1 : rowIndex + 6;
+    if (caBehaviorPage == 0 && rowIndex <= 7)
+        return rowIndex - 1;
+    if (caBehaviorPage == 1 && rowIndex <= 6)
+        return rowIndex + 5;
+    if (caBehaviorPage == 2)
+    {
+        if (rowIndex == 2) return 13;
+        if (rowIndex == 3) return 14;
+    }
+    return -1;
 }
 
 void BeginCarrierEdit(int index)
@@ -1386,6 +1539,20 @@ void BeginCarrierEdit(int index)
         return;
     caEditingIndex = index;
     caEditValue = GetCarrierStoredValue(index);
+    caEditingValue = true;
+}
+
+void BeginCarrierThrustLimitEdit(int index)
+{
+    if (index != 11 && index != 12 && index != 15)
+        return;
+    caEditingIndex = index;
+    if (index == 11)
+        caEditValue = caThrustEditLimitKn;
+    else if (index == 12)
+        caEditValue = caThrustEditUsePercent;
+    else
+        caEditValue = caThrustStepIndex;
     caEditingValue = true;
 }
 
@@ -1418,6 +1585,27 @@ void AdjustCarrierEdit(int direction)
         caEditValue = MathHelper.Clamp(caEditValue, 1, 100);
     else if (caEditingIndex == 13)
         caEditValue = Math.Max(0.1, caEditValue);
+}
+
+void AdjustCarrierThrustLimitEdit(int direction)
+{
+    if (caEditingIndex == 11)
+        caEditValue = Math.Max(1, caEditValue + GetCarrierThrustStepKn() * direction);
+    else if (caEditingIndex == 12)
+        caEditValue = MathHelper.Clamp(caEditValue + 5 * direction, 1, 100);
+    else if (caEditingIndex == 15)
+        caEditValue = MathHelper.Clamp(Math.Round(caEditValue) + direction, 0, GetCarrierThrustStepCount() - 1);
+}
+
+void EndCarrierThrustLimitEdit()
+{
+    if (caEditingIndex == 11)
+        caThrustEditLimitKn = Math.Max(1, caEditValue);
+    else if (caEditingIndex == 12)
+        caThrustEditUsePercent = MathHelper.Clamp(caEditValue, 1, 100);
+    else if (caEditingIndex == 15)
+        caThrustStepIndex = Math.Max(0, Math.Min(GetCarrierThrustStepCount() - 1, (int)Math.Round(caEditValue)));
+    CancelCarrierEdit();
 }
 
 void SaveCarrierEdit()
@@ -1468,6 +1656,74 @@ double GetCarrierStoredValue(int index)
     if (index == 13) return accelerationLimit;
     if (index == 14) return turnTestEnabled ? 1 : 0;
     return 0;
+}
+
+double GetCarrierThrustLimitEditKn()
+{
+    if (caEditingValue && caLcdMenu == CaLcdMenu.ThrustLimit && caEditingIndex == 11)
+        return caEditValue;
+    return caThrustEditLimitKn;
+}
+
+double GetCarrierThrustUseEditPercent()
+{
+    if (caEditingValue && caLcdMenu == CaLcdMenu.ThrustLimit && caEditingIndex == 12)
+        return caEditValue;
+    return caThrustEditUsePercent;
+}
+
+int GetCarrierThrustStepEditIndex()
+{
+    if (caEditingValue && caLcdMenu == CaLcdMenu.ThrustLimit && caEditingIndex == 15)
+        return Math.Max(0, Math.Min(GetCarrierThrustStepCount() - 1, (int)Math.Round(caEditValue)));
+    return caThrustStepIndex;
+}
+
+int GetCarrierThrustStepCount()
+{
+    return 7;
+}
+
+double GetCarrierThrustStepKn()
+{
+    int index = Math.Max(0, Math.Min(GetCarrierThrustStepCount() - 1, caThrustStepIndex));
+    if (index == 0) return 1;
+    if (index == 1) return 10;
+    if (index == 2) return 100;
+    if (index == 3) return 1000;
+    if (index == 4) return 10000;
+    if (index == 5) return 100000;
+    return 1000000;
+}
+
+string GetCarrierThrustStepLabel(int index)
+{
+    if (index == 0) return "1 kN";
+    if (index == 1) return "10 kN";
+    if (index == 2) return "100 kN";
+    if (index == 3) return "1 MN";
+    if (index == 4) return "10 MN";
+    if (index == 5) return "100 MN";
+    return "1 GN";
+}
+
+string FormatWholeNumberWithCommas(double value)
+{
+    long n = Math.Max(0, (long)Math.Round(value));
+    string s = n.ToString();
+    StringBuilder sb = new StringBuilder(s.Length + s.Length / 3);
+    for (int i = 0; i < s.Length; i++)
+    {
+        if (i > 0 && (s.Length - i) % 3 == 0)
+            sb.Append(',');
+        sb.Append(s[i]);
+    }
+    return sb.ToString();
+}
+
+string FormatPercent(double value)
+{
+    return Math.Round(value, 1).ToString("0.#").Replace(',', '.') + "%";
 }
 
 int CountLines(StringBuilder sb)
@@ -1939,6 +2195,42 @@ double GetEffectiveThrustInDirection(Vector3D direction)
             total += t.MaxEffectiveThrust * dot;
     }
     return total;
+}
+
+double GetDetectedMaxCarrierThrustN()
+{
+    MatrixD m = rc == null ? _tickRcMatrix : rc.WorldMatrix;
+    double max = 0;
+    max = Math.Max(max, GetEffectiveThrustInDirection(m.Forward));
+    max = Math.Max(max, GetEffectiveThrustInDirection(m.Backward));
+    max = Math.Max(max, GetEffectiveThrustInDirection(m.Left));
+    max = Math.Max(max, GetEffectiveThrustInDirection(m.Right));
+    max = Math.Max(max, GetEffectiveThrustInDirection(m.Up));
+    max = Math.Max(max, GetEffectiveThrustInDirection(m.Down));
+    return max;
+}
+
+string FormatCompactThrustN(double thrustN)
+{
+    double abs = Math.Abs(thrustN);
+    double scaled;
+    string unit;
+    if (abs >= 1000000000.0)
+    {
+        scaled = thrustN / 1000000000.0;
+        unit = "GN";
+    }
+    else if (abs >= 1000000.0)
+    {
+        scaled = thrustN / 1000000.0;
+        unit = "MN";
+    }
+    else
+    {
+        scaled = thrustN / 1000.0;
+        unit = "kN";
+    }
+    return scaled.ToString("000.0").Replace(',', '.') + " " + unit;
 }
 
 double GetHardThrustLimitN()
