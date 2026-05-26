@@ -37,7 +37,6 @@
 // AUTOSERVICE <ON|OFF> : toggles automatic return-to-carrier service during path playback
 // AUTOCARGO <percent> : cargo fill percent that triggers automatic service return
 // AUTOHYDRO <percent> : hydrogen percent that triggers automatic service return
-// AUTORESUMEHYDRO <percent> : hydrogen percent required before automatic service undocks again
 // TOFF r,u,f : sets target offset in local Right,Up,Forward meters
 // TOFFRESET : clears target offset
 // =====================================
@@ -97,7 +96,7 @@ double carrierPoseForwardOffset = -1.25; // broadcaster sends connector position
 bool autoServiceReturnEnabled = true;
 double autoServiceCargoTriggerPercent = 90.0;
 double autoServiceHydrogenTriggerPercent = 20.0;
-double autoServiceHydrogenResumePercent = 85.0;
+const double autoServiceHydrogenResumePercent = 100.0;
 double autoServiceCargoResumePercent = 1.0;
 int autoServiceCheckIntervalTicks = 300;
 // =============================================
@@ -338,6 +337,7 @@ bool carrierAutopilotOn = false;
 double carrierStatusAgeSeconds = 9999;
 bool miCursorControl = false;
 int miMenuIndex = 0;
+int miBehaviorPage = 0;
 bool miEditingValue = false;
 int miEditingIndex = -1;
 double miEditValue = 0;
@@ -749,8 +749,8 @@ bool TryHandleMinerLcdCommand(string trimmed)
 int GetMinerMenuItemCount()
 {
     if (miLcdMenu == MiLcdMenu.Main) return 4;
-    if (miLcdMenu == MiLcdMenu.BehaviorSettings) return 8;
-    if (miLcdMenu == MiLcdMenu.RecordPath) return 5;
+    if (miLcdMenu == MiLcdMenu.BehaviorSettings) return miBehaviorPage == 0 ? 8 : 6;
+    if (miLcdMenu == MiLcdMenu.RecordPath) return 6;
     if (miLcdMenu == MiLcdMenu.SetMinePose) return 3;
     if (miLcdMenu == MiLcdMenu.SetCornerA) return 3;
     if (miLcdMenu == MiLcdMenu.MineArea) return 4;
@@ -856,10 +856,21 @@ void SelectMinerCursor()
 
     if (miLcdMenu == MiLcdMenu.BehaviorSettings)
     {
-        if (miMenuIndex == 6)
+        if (miMenuIndex == 1)
+        {
+            miBehaviorPage = (miBehaviorPage + 1) % 2;
+            miMenuIndex = 1;
+            CancelMinerEdit();
+            return;
+        }
+
+        int settingIndex = GetMinerBehaviorSettingIndexForRow(miMenuIndex);
+        if (settingIndex == 6)
             CycleDepthMode();
-        else if (miMenuIndex < 6 || miMenuIndex == 7)
-            BeginMinerEdit(miMenuIndex);
+        else if (settingIndex == 8)
+            autoServiceReturnEnabled = !autoServiceReturnEnabled;
+        else if (settingIndex > 0)
+            BeginMinerEdit(settingIndex);
         return;
     }
 
@@ -872,15 +883,20 @@ void SelectMinerCursor()
     }
     if (miLcdMenu == MiLcdMenu.RecordPath && miMenuIndex == 2)
     {
-        StartManualDock();
+        BeginMinerEdit(11);
         return;
     }
     if (miLcdMenu == MiLcdMenu.RecordPath && miMenuIndex == 3)
     {
-        StartPathRecordReverseReturn(PathRecordReverseMode.Undo);
+        StartManualDock();
         return;
     }
     if (miLcdMenu == MiLcdMenu.RecordPath && miMenuIndex == 4)
+    {
+        StartPathRecordReverseReturn(PathRecordReverseMode.Undo);
+        return;
+    }
+    if (miLcdMenu == MiLcdMenu.RecordPath && miMenuIndex == 5)
     {
         StartPathRecordReverseReturn(PathRecordReverseMode.Cancel);
         OpenMinerMenu(MiLcdMenu.Main);
@@ -987,6 +1003,8 @@ void OpenMinerMenu(MiLcdMenu menu)
 {
     miLcdMenu = menu;
     miMenuIndex = 0;
+    if (menu == MiLcdMenu.BehaviorSettings)
+        miBehaviorPage = 0;
     CancelMinerEdit();
 }
 
@@ -1011,6 +1029,9 @@ void BeginMinerEdit(int index)
     else if (index == 4) miEditValue = SPEEDF;
     else if (index == 5) miEditValue = SPEEDB;
     else if (index == 7) miEditValue = lcdRefreshIntervalTicks;
+    else if (index == 9) miEditValue = autoServiceCargoTriggerPercent;
+    else if (index == 10) miEditValue = autoServiceHydrogenTriggerPercent;
+    else if (index == 11) miEditValue = pathRecordMeters;
     miEditingValue = true;
 }
 
@@ -1021,9 +1042,15 @@ void AdjustMinerEdit(int direction)
     else if (miEditingIndex == 2 || miEditingIndex == 3) step = 0.5;
     if (miEditingIndex == 4 || miEditingIndex == 5) step = 0.1;
     if (miEditingIndex == 7) step = 1.0;
+    if (miEditingIndex == 9 || miEditingIndex == 10) step = 2.5;
+    if (miEditingIndex == 11) step = 5.0;
     miEditValue = Math.Max(0, miEditValue + step * direction);
     if (miEditingIndex == 7)
         miEditValue = Math.Max(lcdRefreshMinTicks, miEditValue);
+    else if (miEditingIndex == 9 || miEditingIndex == 10)
+        miEditValue = MathHelper.Clamp(miEditValue, 0, 100);
+    else if (miEditingIndex == 11)
+        miEditValue = Math.Max(5.0, miEditValue);
 }
 
 void SaveMinerEdit()
@@ -1041,6 +1068,9 @@ void SaveMinerEdit()
     else if (miEditingIndex == 4) SPEEDF = Math.Max(0.1, miEditValue);
     else if (miEditingIndex == 5) SPEEDB = Math.Max(0.1, miEditValue);
     else if (miEditingIndex == 7) lcdRefreshIntervalTicks = Math.Max(lcdRefreshMinTicks, (int)Math.Round(miEditValue));
+    else if (miEditingIndex == 9) autoServiceCargoTriggerPercent = MathHelper.Clamp(miEditValue, 0, 100);
+    else if (miEditingIndex == 10) autoServiceHydrogenTriggerPercent = MathHelper.Clamp(miEditValue, 0, 100);
+    else if (miEditingIndex == 11) pathRecordMeters = Math.Max(5.0, miEditValue);
     CancelMinerEdit();
 }
 
@@ -1199,22 +1229,37 @@ void AppendMinerRows(StringBuilder sb)
 
     if (miLcdMenu == MiLcdMenu.BehaviorSettings)
     {
-        AppendMinerValueRow(sb, "Default mining depth", 1, GetMinerValue(1), " m", "0.0");
-        AppendMinerValueRow(sb, "Lane width", 2, GetMinerValue(2), " m", "0.0");
-        AppendMinerValueRow(sb, "Lane height", 3, GetMinerValue(3), " m", "0.0");
-        AppendMinerValueRow(sb, "Forward speed", 4, GetMinerValue(4), " m/s", "0.0");
-        AppendMinerValueRow(sb, "Return speed", 5, GetMinerValue(5), " m/s", "0.0");
-        AppendMinerMenuRow(sb, "Ore mode: " + DepthModeLabel(), 6, false);
-        AppendMinerValueRow(sb, "LCD refresh", 7, GetMinerValue(7), " ticks", "0");
+        AppendMinerMenuRow(sb, "Next page " + (miBehaviorPage + 1) + "/2", 1, false);
+        sb.AppendLine();
+        if (miBehaviorPage == 0)
+        {
+            AppendMinerBehaviorValueRow(sb, "Default mining depth", 1, 2, " m", "0.0");
+            AppendMinerBehaviorValueRow(sb, "Lane width", 2, 3, " m", "0.0");
+            AppendMinerBehaviorValueRow(sb, "Lane height", 3, 4, " m", "0.0");
+            AppendMinerBehaviorValueRow(sb, "Forward speed", 4, 5, " m/s", "0.0");
+            AppendMinerBehaviorValueRow(sb, "Return speed", 5, 6, " m/s", "0.0");
+            AppendMinerBehaviorToggleRow(sb, "Ore mode: " + DepthModeLabel(), 6, 7);
+        }
+        else
+        {
+            AppendMinerBehaviorValueRow(sb, "LCD refresh", 7, 2, " ticks", "0");
+            AppendMinerBehaviorToggleRow(sb, "Resupply [" + (autoServiceReturnEnabled ? "On" : "Off") + "]", 8, 3);
+            AppendMinerBehaviorValueRow(sb, "Resupply Cargo", 9, 4, "%", "0.0");
+            AppendMinerBehaviorValueRow(sb, "Resupply H2", 10, 5, "%", "0.0");
+        }
         return;
     }
 
     if (miLcdMenu == MiLcdMenu.RecordPath)
     {
         AppendMinerMenuRow(sb, "Set mine pose", 1, false);
-        AppendMinerMenuRow(sb, "Finish path", 2, false);
-        AppendMinerMenuRow(sb, "  Undo path", 3, false);
-        AppendMinerMenuRow(sb, "  Cancel path", 4, false);
+        AppendMinerRecordMetersRow(sb, 2);
+        AppendMinerMenuRow(sb, "Finish path", 3, false);
+        AppendMinerMenuRow(sb, "  Undo path", 4, false);
+        AppendMinerMenuRow(sb, "  Cancel path", 5, false);
+        sb.AppendLine();
+        sb.AppendLine(" Save memory by increasing the");
+        sb.AppendLine(" distance between path points. ");
         return;
     }
 
@@ -1350,21 +1395,21 @@ string GetMinerFooterInfo()
         return "Return to EMM-A main menu.";
     if (miLcdMenu == MiLcdMenu.BehaviorSettings)
     {
-        if (miMenuIndex == 1) return "Set normal drilling depth.";
-        if (miMenuIndex == 2) return "Set lane spacing width.";
-        if (miMenuIndex == 3) return "Set lane spacing height.";
-        if (miMenuIndex == 4) return "Set drilling speed.";
-        if (miMenuIndex == 5) return "Set return/backout speed.";
-        if (miMenuIndex == 6) return "Set depth stop behavior.";
-        if (miMenuIndex == 7) return "Set LCD update interval.";
+        if (miMenuIndex == 1) return "Show next settings page.";
+        int settingIndex = GetMinerBehaviorSettingIndexForRow(miMenuIndex);
+        if (settingIndex == 1) return "Set normal drilling depth.";
+        if (settingIndex == 2) return "Set lane spacing width.";
+        if (settingIndex == 3) return "Set lane spacing height.";
+        if (settingIndex == 4) return "Set drilling speed.";
+        if (settingIndex == 5) return "Set return/backout speed.";
+        if (settingIndex == 6) return "Set depth stop behavior.";
+        if (settingIndex == 7) return "Set LCD update interval.";
+        if (settingIndex == 8) return "Toggle automatic resupply.";
+        if (settingIndex == 9) return "Set cargo return threshold.";
+        if (settingIndex == 10) return "Set hydrogen return threshold.";
     }
     if (miLcdMenu == MiLcdMenu.RecordPath)
-    {
-        if (miMenuIndex == 1) return "Save current mine pose.";
-        if (miMenuIndex == 2) return "Finish path within 50 m of dock.";
-        if (miMenuIndex == 3) return "Remove last recorded section.";
-        if (miMenuIndex == 4) return "Cancel and clear this path.";
-    }
+        return "Current size: " + GetPathTimerCustomDataSizeText();
     if (miLcdMenu == MiLcdMenu.SetMinePose)
     {
         if (miMenuIndex == 1) return "Save first mining corner.";
@@ -1438,6 +1483,60 @@ void AppendMinerValueRow(StringBuilder sb, string label, int index, double value
     sb.AppendLine(unit);
 }
 
+void AppendMinerRecordMetersRow(StringBuilder sb, int rowIndex)
+{
+    bool selected = miMenuIndex == rowIndex;
+    bool editSelected = miEditingValue && selected && miEditingIndex == 11;
+    if (selected)
+        sb.Append(editSelected ? "< " : "> ");
+    else
+        sb.Append("-  ");
+    sb.Append("Record meters  ");
+    sb.Append(GetMinerValue(11).ToString("0"));
+    sb.AppendLine(" m");
+}
+
+void AppendMinerBehaviorValueRow(StringBuilder sb, string label, int settingIndex, int rowIndex, string unit, string fmt)
+{
+    bool selected = miMenuIndex == rowIndex;
+    bool editSelected = miEditingValue && selected && miEditingIndex == settingIndex;
+    if (selected)
+        sb.Append(editSelected ? "< " : "> ");
+    else
+        sb.Append("-  ");
+    sb.Append(label);
+    sb.Append(": ");
+    sb.Append(GetMinerValue(settingIndex).ToString(fmt));
+    sb.AppendLine(unit);
+}
+
+void AppendMinerBehaviorToggleRow(StringBuilder sb, string label, int settingIndex, int rowIndex)
+{
+    bool selected = miMenuIndex == rowIndex;
+    bool editSelected = miEditingValue && selected && miEditingIndex == settingIndex;
+    if (selected)
+        sb.Append(editSelected ? "< " : "> ");
+    else
+        sb.Append("-  ");
+    sb.AppendLine(label);
+}
+
+int GetMinerBehaviorSettingIndexForRow(int rowIndex)
+{
+    if (rowIndex < 2)
+        return -1;
+    if (miBehaviorPage == 0 && rowIndex <= 7)
+        return rowIndex - 1;
+    if (miBehaviorPage == 1)
+    {
+        if (rowIndex == 2) return 7;
+        if (rowIndex == 3) return 8;
+        if (rowIndex == 4) return 9;
+        if (rowIndex == 5) return 10;
+    }
+    return -1;
+}
+
 double GetMinerValue(int index)
 {
     if (miEditingValue && miEditingIndex == index)
@@ -1448,6 +1547,10 @@ double GetMinerValue(int index)
     if (index == 4) return SPEEDF;
     if (index == 5) return SPEEDB;
     if (index == 7) return lcdRefreshIntervalTicks;
+    if (index == 8) return autoServiceReturnEnabled ? 1 : 0;
+    if (index == 9) return autoServiceCargoTriggerPercent;
+    if (index == 10) return autoServiceHydrogenTriggerPercent;
+    if (index == 11) return pathRecordMeters;
     return 0;
 }
 
@@ -1456,6 +1559,14 @@ string DepthModeLabel()
     if (depthMode == DepthMode.Ore) return "Ore only";
     if (depthMode == DepthMode.OrePlusStone) return "Ore + stone";
     return "Fixed depth";
+}
+
+string GetPathTimerCustomDataSizeText()
+{
+    IMyTimerBlock timer = FindPathTimer();
+    int chars = timer == null || timer.CustomData == null ? 0 : timer.CustomData.Length;
+    double kb = chars / 1024.0;
+    return kb.ToString("0.0") + " KB";
 }
 
 int CountMinerLines(StringBuilder sb)
@@ -1964,11 +2075,6 @@ void RemoteCommand (string command)
     if (trimmed.StartsWith("AUTOHYDRO ", StringComparison.OrdinalIgnoreCase))
     {
         TrySetPercentDouble(trimmed, 10, ref autoServiceHydrogenTriggerPercent, "AUTOHYDRO");
-        return;
-    }
-    if (trimmed.StartsWith("AUTORESUMEHYDRO ", StringComparison.OrdinalIgnoreCase))
-    {
-        TrySetPercentDouble(trimmed, 16, ref autoServiceHydrogenResumePercent, "AUTORESUMEHYDRO");
         return;
     }
     if (trimmed.StartsWith("TOFF ", StringComparison.OrdinalIgnoreCase))
@@ -6476,7 +6582,6 @@ void SaveState()
     ini.Set(StateIniSection, "autoServiceReturnEnabled", autoServiceReturnEnabled ? "1" : "0");
     ini.Set(StateIniSection, "autoServiceCargoTriggerPercent", autoServiceCargoTriggerPercent.ToString("R"));
     ini.Set(StateIniSection, "autoServiceHydrogenTriggerPercent", autoServiceHydrogenTriggerPercent.ToString("R"));
-    ini.Set(StateIniSection, "autoServiceHydrogenResumePercent", autoServiceHydrogenResumePercent.ToString("R"));
     ini.Set(StateIniSection, "autoServiceState", (int)autoServiceState);
     ini.Set(StateIniSection, "autoServiceReason", autoServiceReason);
     ini.Set(StateIniSection, "autoServiceResumePathTimer", autoServiceResumePathTimer ? "1" : "0");
@@ -6585,7 +6690,6 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "autoServiceReturnEnabled", autoServiceReturnEnabled ? "1" : "0");
     ini.Set(ProgressIniSection, "autoServiceCargoTriggerPercent", autoServiceCargoTriggerPercent.ToString("R"));
     ini.Set(ProgressIniSection, "autoServiceHydrogenTriggerPercent", autoServiceHydrogenTriggerPercent.ToString("R"));
-    ini.Set(ProgressIniSection, "autoServiceHydrogenResumePercent", autoServiceHydrogenResumePercent.ToString("R"));
     ini.Set(ProgressIniSection, "autoServiceState", (int)autoServiceState);
     ini.Set(ProgressIniSection, "autoServiceReason", autoServiceReason);
     ini.Set(ProgressIniSection, "autoServiceResumePathTimer", autoServiceResumePathTimer ? "1" : "0");
@@ -6778,8 +6882,6 @@ void LoadState()
         autoServiceCargoTriggerPercent = MathHelper.Clamp(d, 0, 100);
     if (double.TryParse(StateString(ini, "autoServiceHydrogenTriggerPercent", autoServiceHydrogenTriggerPercent.ToString("R")), out d))
         autoServiceHydrogenTriggerPercent = MathHelper.Clamp(d, 0, 100);
-    if (double.TryParse(StateString(ini, "autoServiceHydrogenResumePercent", autoServiceHydrogenResumePercent.ToString("R")), out d))
-        autoServiceHydrogenResumePercent = MathHelper.Clamp(d, 0, 100);
     if (int.TryParse(StateString(ini, "autoServiceState", ((int)autoServiceState).ToString()), out n))
     {
         if (n < 0 || n > (int)AutoServiceState.Undocking)
