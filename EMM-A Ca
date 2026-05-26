@@ -2588,6 +2588,7 @@ void CompleteMineSequence(string logPrefix)
         else
             Echo($"{logPrefix}: warning - could not set asteroid {completedAsteroid:D3} status to Completed.");
     }
+    ClearMinerPathTimer(logPrefix);
 
     autopilotEnabled = false;
     hasTarget = false;
@@ -2620,6 +2621,7 @@ void CompleteMineRecallSequence()
         else
             Echo($"Recall: warning - could not set asteroid {recalledAsteroid:D3} status to Completed.");
     }
+    ClearMinerPathTimer("Recall");
 
     autopilotEnabled = false;
     hasTarget = false;
@@ -3692,11 +3694,7 @@ void SaveAsteroid()
     UpdateZoneDb(activeZone, asteroidNum, carrierGps, oreMap);
 
     Echo($"SaveAsteroid: Asteroid {label} saved in zone '{activeZone.Name}'.");
-    IMyTimerBlock minerPathTimer = FindMinerPathTimer();
-    if (minerPathTimer != null)
-        minerPathTimer.CustomData = "";
-    else
-        Echo($"SaveAsteroid: miner path timer '{minerPathTimerTag}' not found; cannot clear.");
+    ClearMinerPathTimer("SaveAsteroid");
 }
 
 void UpdateCurrentAsteroidFromMinerPath()
@@ -4222,6 +4220,20 @@ IMyTimerBlock FindMinerPathTimer()
     return null;
 }
 
+bool ClearMinerPathTimer(string logPrefix)
+{
+    IMyTimerBlock timer = FindMinerPathTimer();
+    if (timer == null)
+    {
+        Echo($"{logPrefix}: miner path timer '{minerPathTimerTag}' not found; cannot clear.");
+        return false;
+    }
+
+    timer.CustomData = "";
+    Echo($"{logPrefix}: miner path timer cleared.");
+    return true;
+}
+
 // Reads and returns all non-empty lines from the miner's Path timer custom data.
 List<string> ReadMinerPathLines()
 {
@@ -4286,7 +4298,6 @@ bool LoadAsteroid(string argument)
         Echo($"LoadAsteroid: miner path timer '{minerPathTimerTag}' not found.");
         return false;
     }
-    pathTimer.CustomData = "";
 
     int dbIndex = (asteroidNum - 1) / asteroidsPerDb + 1;
     string dbTimerName = asteroidDbTagPfx + dbIndex.ToString("D2");
