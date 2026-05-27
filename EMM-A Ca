@@ -691,6 +691,8 @@ bool TryHandleCarrierLcdCommand(string trimmed)
             CancelCarrierEdit();
         else if (caLcdMenu == CaLcdMenu.ThrustLimit)
             CloseCarrierThrustLimitMenu();
+        else if (caLcdMenu == CaLcdMenu.SelectOres)
+            BackToCarrierAutonomousMiningMenu();
         else
         {
             caLcdMenu = CaLcdMenu.Main;
@@ -765,6 +767,11 @@ void SelectCarrierCursor()
 
     if (caMenuIndex == 0)
     {
+        if (caLcdMenu == CaLcdMenu.SelectOres)
+        {
+            BackToCarrierAutonomousMiningMenu();
+            return;
+        }
         OpenCarrierMenu(CaLcdMenu.Main);
         return;
     }
@@ -854,6 +861,12 @@ void OpenCarrierMenu(CaLcdMenu menu)
     if (menu == CaLcdMenu.BehaviorSettings)
         caBehaviorPage = 0;
     CancelCarrierEdit();
+}
+
+void BackToCarrierAutonomousMiningMenu()
+{
+    OpenCarrierMenu(CaLcdMenu.AutonomousMining);
+    caMenuIndex = 2;
 }
 
 void OpenCarrierThrustLimitMenu()
@@ -1295,6 +1308,8 @@ string GetCarrierFooterInfo()
         if (caMenuIndex == 2) return "Adjust carrier behavior.";
         if (caMenuIndex == 3) return "Show carrier stats.";
     }
+    if (caLcdMenu == CaLcdMenu.SelectOres && caMenuIndex == 0)
+        return "Back to Autonomous mining.";
     if (caMenuIndex == 0 && caLcdMenu != CaLcdMenu.ThrustLimit)
         return "Return to EMM-A main menu.";
     if (caLcdMenu == CaLcdMenu.AutonomousMining)
@@ -5730,6 +5745,21 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "cruiseDirection", V3ToString(cruiseDirection));
     ini.Set(ProgressIniSection, "measuredFlipSeconds", measuredFlipSeconds.ToString("R"));
     ini.Set(ProgressIniSection, "measuredFlipMass", measuredFlipMass.ToString("R"));
+    ini.Set(ProgressIniSection, "maxSpeed", maxSpeed.ToString("R"));
+    ini.Set(ProgressIniSection, "orientationToleranceDeg", orientationToleranceDeg.ToString("R"));
+    ini.Set(ProgressIniSection, "arrivalTolerance", arrivalTolerance.ToString("R"));
+    ini.Set(ProgressIniSection, "goToBubbleRadiusMeters", goToBubbleRadiusMeters.ToString("R"));
+    ini.Set(ProgressIniSection, "fullAutoRetryTicks", fullAutoRetryTicks);
+    ini.Set(ProgressIniSection, "fullAutoRecordsPerTick", fullAutoRecordsPerTick);
+    ini.Set(ProgressIniSection, "shortRangeDistanceMeters", shortRangeDistanceMeters.ToString("R"));
+    ini.Set(ProgressIniSection, "cruiseOffsetMeters", cruiseOffsetMeters.ToString("R"));
+    ini.Set(ProgressIniSection, "thrustLimitKn", thrustLimitKn.ToString("R"));
+    ini.Set(ProgressIniSection, "thrustUsePercent", thrustUsePercent.ToString("R"));
+    ini.Set(ProgressIniSection, "caThrustStepIndex", caThrustStepIndex);
+    ini.Set(ProgressIniSection, "accelerationLimit", accelerationLimit.ToString("R"));
+    ini.Set(ProgressIniSection, "turnTestEnabled", turnTestEnabled ? "1" : "0");
+    ini.Set(ProgressIniSection, "goToLeadDistanceMeters", goToLeadDistanceMeters.ToString("R"));
+    ini.Set(ProgressIniSection, "lcdRefreshIntervalTicks", lcdRefreshIntervalTicks);
     ini.Set(ProgressIniSection, "pathMode", pathMode ? "1" : "0");
     ini.Set(ProgressIniSection, "pathPaused", pathPaused ? "1" : "0");
     ini.Set(ProgressIniSection, "pathPausedNavResume", pathPausedNavResume ? "1" : "0");

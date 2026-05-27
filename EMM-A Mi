@@ -60,9 +60,14 @@ string pathTimerTag = "EMM-A Mi Path";
 // Periodic volatile progress is stored as a small PB Storage overlay to avoid CustomData write spikes.
 string stateIniTimerTag = "EMM-A Mi INI";
 int maxStuckRetries = 3; // skip hole after this many stuck retries; 0 = retry forever
-double pathRecordMeters = 25.0;
+double pathRecordMeters = 50.0;
 double pathRecordMineDepth = 30.0;
 string pathRecordMineSensorTag = "EMM-A Mi Sensor";
+string pathRecordAsteroidSensorTag = "EMM-A Mi Asteroid Sensor";
+double pathRecordAsteroidDenseMeters = 25.0;
+double pathRecordAsteroidSparseMeters = 50.0;
+int pathRecordAsteroidSensorPollTicks = 60;
+int pathRecordAsteroidClearPollsRequired = 3;
 string carrierConnectorName = "EMM-A Ca Connector";
 string carrierRemoteName = "EMM-A Ca Remote Control";
 string minerConnectorName = "EMM-A Mi Connector";
@@ -187,6 +192,11 @@ bool pathRecordingEnabled = false;
 bool pathRecordingPaused = false;
 bool pathRecordingWaitReturn = false;
 bool pathRecordingStartPendingAfterUndock = false;
+bool pathRecordAsteroidDenseActive = false;
+bool pathRecordAsteroidAutoChangedMeters = false;
+bool pathRecordAsteroidManualOverride = false;
+int pathRecordAsteroidSensorTicks = 0;
+int pathRecordAsteroidClearPolls = 0;
 bool cockpitGyroControlForcedOff = false;
 Vector3D pathRecordLastPos = Vector3D.Zero;
 int pathRecordCounter = 0;
@@ -394,6 +404,8 @@ IMyTimerBlock _cachedPathTimer;
 IMyTimerBlock _cachedStateIniTimer;
 List<IMySensorBlock> _mineSensors = new List<IMySensorBlock>();
 bool _mineSensorsCached = false;
+List<IMySensorBlock> _asteroidSensors = new List<IMySensorBlock>();
+bool _asteroidSensorsCached = false;
 const string StateIniSection = "state";
 const string ProgressIniSection = "progress";
 MyIni _stateIni = new MyIni();
@@ -557,6 +569,7 @@ public void Main (string argument, UpdateType updateSource)
             WriteEcho();
             SaveStateProgressOnly();
         }
+        UpdatePathRecordAsteroidSpacing();
 
         if (miningEnabled)
             UpdateMiningState();
@@ -1119,7 +1132,17 @@ void CycleDepthMode()
 
 void TogglePathRecordMeters()
 {
+    MarkPathRecordMetersManualChange();
     pathRecordMeters = Math.Abs(pathRecordMeters - 25.0) <= Math.Abs(pathRecordMeters - 50.0) ? 50.0 : 25.0;
+}
+
+void MarkPathRecordMetersManualChange()
+{
+    if (!pathRecordAsteroidDenseActive)
+        return;
+
+    pathRecordAsteroidAutoChangedMeters = false;
+    pathRecordAsteroidManualOverride = true;
 }
 
 void AutoAdvanceMinerLcdMenu()
@@ -2157,6 +2180,7 @@ void RemoteCommand (string command)
     }
     if (trimmed.StartsWith("PATHRECORDMETERS ", StringComparison.OrdinalIgnoreCase))
     {
+        MarkPathRecordMetersManualChange();
         TrySetPositiveDouble(trimmed, 17, ref pathRecordMeters, "PATHRECORDMETERS", "m", 0.1, "0.0");
         return;
     }
@@ -2269,6 +2293,7 @@ void RemoteCommand (string command)
             pathRecordingPaused = false;
             pathRecordingWaitReturn = false;
             pathRecordingStartPendingAfterUndock = false;
+            ClearPathRecordAsteroidSpacing();
             pathRecordMineStage = PathRecordMineStage.Idle;
             resumePathRecordingAfterMineArea = false;
             pathRecordMinePreviewActive = false;
@@ -2488,7 +2513,10 @@ void StartPathRecordingCore(string command)
     {
         double v;
         if (double.TryParse(parts[1], out v) && v > 0.1)
+        {
+            MarkPathRecordMetersManualChange();
             pathRecordMeters = v;
+        }
     }
 
     if (IsMinerDocked())
@@ -2518,6 +2546,7 @@ void BeginPathRecording()
     pathRecordingEnabled = true;
     pathRecordingPaused = false;
     pathRecordingWaitReturn = false;
+    pathRecordAsteroidSensorTicks = 0;
     pathRecordMineStage = PathRecordMineStage.Idle;
     pathRecordMineCorrectionThrustActive = false;
     pathRecordMineConfirmHoldActive = false;
@@ -2533,6 +2562,7 @@ void StopPathRecording()
 {
     bool reverseWasActive = pathRecordReverseMode != PathRecordReverseMode.None;
     ReleasePathRecordMineConfirmHold();
+    ClearPathRecordAsteroidSpacing();
     ClearPathRecordReverseState();
     pathRecordingEnabled = false;
     pathRecordingPaused = false;
@@ -2604,7 +2634,7 @@ bool UpdatePathRecordState()
                 ArmPathRecordMineConfirmHold();
                 OpenMinerMenu(MiLcdMenu.ConfirmExcavationZone);
                 miMenuIndex = 0;
-                Echo("Excavation Zone preview complete. Confirm or adjust.");
+                Echo("Excavation Zone ready. Confirm or adjust.");
                 return false;
             }
             // Auto-start area mining for the area just recorded (corners cleared after to prevent re-trigger)
@@ -2932,6 +2962,7 @@ void CompletePathRecordReverseReturn()
         }
 
         ClearPathRecordReverseState();
+        ClearPathRecordAsteroidSpacing();
         pathRecordingEnabled = true;
         pathRecordingPaused = false;
         pathRecordingWaitReturn = false;
@@ -2950,6 +2981,7 @@ void CompletePathRecordReverseReturn()
     }
 
     ClearPathRecordReverseState();
+    ClearPathRecordAsteroidSpacing();
     pathRecordingEnabled = false;
     pathRecordingPaused = false;
     pathRecordingWaitReturn = false;
@@ -2981,6 +3013,7 @@ bool IsWithinDockRangeForPathCancel()
 void CancelPathRecordingWithoutReverse()
 {
     ReleasePathRecordMineConfirmHold();
+    ClearPathRecordAsteroidSpacing();
     ClearPathRecordReverseState();
     pathRecordingEnabled = false;
     pathRecordingPaused = false;
@@ -3428,6 +3461,91 @@ void InitializeMineIndicatorSensors()
         s.LeftExtend = s.RightExtend = s.TopExtend = s.BottomExtend = s.BackExtend = 0.1f;
         s.FrontExtend = 50f;
     }
+}
+
+List<IMySensorBlock> GetAsteroidSensors()
+{
+    if (_asteroidSensorsCached)
+        return _asteroidSensors;
+
+    _asteroidSensors.Clear();
+    foreach (var s in GetBlocks<IMySensorBlock>())
+        if (s != null && !string.IsNullOrWhiteSpace(s.CustomName) &&
+            s.CustomName.IndexOf(pathRecordAsteroidSensorTag, StringComparison.OrdinalIgnoreCase) >= 0)
+            _asteroidSensors.Add(s);
+    _asteroidSensorsCached = true;
+    return _asteroidSensors;
+}
+
+void UpdatePathRecordAsteroidSpacing()
+{
+    if (pathRecordAsteroidSensorTicks > 0)
+    {
+        pathRecordAsteroidSensorTicks--;
+        return;
+    }
+    pathRecordAsteroidSensorTicks = Math.Max(1, pathRecordAsteroidSensorPollTicks) - 1;
+
+    if (!pathRecordingEnabled)
+    {
+        ClearPathRecordAsteroidSpacing();
+        return;
+    }
+
+    if (AnyAsteroidSensorActive())
+    {
+        pathRecordAsteroidClearPolls = 0;
+        if (!pathRecordAsteroidDenseActive)
+        {
+            pathRecordAsteroidDenseActive = true;
+            pathRecordAsteroidManualOverride = false;
+            if (IsNear(pathRecordMeters, pathRecordAsteroidSparseMeters))
+            {
+                pathRecordMeters = pathRecordAsteroidDenseMeters;
+                pathRecordAsteroidAutoChangedMeters = true;
+            }
+            else
+                pathRecordAsteroidAutoChangedMeters = false;
+        }
+        return;
+    }
+
+    if (!pathRecordAsteroidDenseActive)
+        return;
+
+    pathRecordAsteroidClearPolls++;
+    if (pathRecordAsteroidClearPolls < Math.Max(1, pathRecordAsteroidClearPollsRequired))
+        return;
+
+    if (pathRecordAsteroidAutoChangedMeters && IsNear(pathRecordMeters, pathRecordAsteroidDenseMeters))
+        pathRecordMeters = pathRecordAsteroidSparseMeters;
+    pathRecordAsteroidDenseActive = false;
+    pathRecordAsteroidAutoChangedMeters = false;
+    pathRecordAsteroidManualOverride = false;
+    pathRecordAsteroidClearPolls = 0;
+}
+
+bool AnyAsteroidSensorActive()
+{
+    foreach (var s in GetAsteroidSensors())
+        if (s != null && s.IsActive)
+            return true;
+    return false;
+}
+
+void ClearPathRecordAsteroidSpacing()
+{
+    if (pathRecordAsteroidAutoChangedMeters && IsNear(pathRecordMeters, pathRecordAsteroidDenseMeters))
+        pathRecordMeters = pathRecordAsteroidSparseMeters;
+    pathRecordAsteroidDenseActive = false;
+    pathRecordAsteroidAutoChangedMeters = false;
+    pathRecordAsteroidManualOverride = false;
+    pathRecordAsteroidClearPolls = 0;
+}
+
+bool IsNear(double value, double target)
+{
+    return Math.Abs(value - target) < 0.001;
 }
 
 void SetCockpitGyroControl(bool enabled)
@@ -6422,9 +6540,16 @@ void NextHole(bool skipToLast = false)
 void ReturnToRecordedMinePoseWithoutPreview()
 {
     ClearPathRecordMineBoundaryLock();
-    pathRecordMineCornerA = Vector3D.Zero;
-    pathRecordMineCornerB = Vector3D.Zero;
     resumePathRecordingAfterMineArea = false;
+    bool hasPendingMineArea =
+        !string.IsNullOrWhiteSpace(pathRecordPendingMineAreaLine) &&
+        (pathRecordMineCornerB - pathRecordMineCornerA).LengthSquared() > 0.01;
+    pathRecordMinePreviewActive = hasPendingMineArea;
+    if (!hasPendingMineArea)
+    {
+        pathRecordMineCornerA = Vector3D.Zero;
+        pathRecordMineCornerB = Vector3D.Zero;
+    }
     pathRecordMineStage = PathRecordMineStage.ReturningToEntry;
     pathRecordingWaitReturn = true;
     targetPosition = pathRecordMineEntry;
@@ -6643,6 +6768,8 @@ void SaveState()
     ini.Set(StateIniSection, "drillAxis", V3ToString(drillAxis));
     ini.Set(StateIniSection, "laneDepth", laneDepth.ToString("R"));
     ini.Set(StateIniSection, "activeMaxSpeed", activeMaxSpeed.ToString("R"));
+    ini.Set(StateIniSection, "pointToPointAccelerationLimit", pointToPointAccelerationLimit.ToString("R"));
+    ini.Set(StateIniSection, "pointToPointThrustUsePercent", pointToPointThrustUsePercent.ToString("R"));
     ini.Set(StateIniSection, "depthMode", (int)depthMode);
     ini.Set(StateIniSection, "areaMiningMode", areaMiningMode ? "1" : "0");
     ini.Set(StateIniSection, "areaLaneIndex", areaLaneIndex);
@@ -6682,6 +6809,10 @@ void SaveState()
     ini.Set(StateIniSection, "pathRecordingPaused", pathRecordingPaused ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordingWaitReturn", pathRecordingWaitReturn ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordingStartPendingAfterUndock", pathRecordingStartPendingAfterUndock ? "1" : "0");
+    ini.Set(StateIniSection, "pathRecordAsteroidDenseActive", pathRecordAsteroidDenseActive ? "1" : "0");
+    ini.Set(StateIniSection, "pathRecordAsteroidAutoChangedMeters", pathRecordAsteroidAutoChangedMeters ? "1" : "0");
+    ini.Set(StateIniSection, "pathRecordAsteroidManualOverride", pathRecordAsteroidManualOverride ? "1" : "0");
+    ini.Set(StateIniSection, "pathRecordAsteroidClearPolls", pathRecordAsteroidClearPolls);
     ini.Set(StateIniSection, "pathRecordLastPos", V3ToString(pathRecordLastPos));
     ini.Set(StateIniSection, "pathRecordCounter", pathRecordCounter);
     ini.Set(StateIniSection, "pathRecordMineCounter", pathRecordMineCounter);
@@ -6772,6 +6903,8 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "drillAxis", V3ToString(drillAxis));
     ini.Set(ProgressIniSection, "laneDepth", laneDepth.ToString("R"));
     ini.Set(ProgressIniSection, "activeMaxSpeed", activeMaxSpeed.ToString("R"));
+    ini.Set(ProgressIniSection, "pointToPointAccelerationLimit", pointToPointAccelerationLimit.ToString("R"));
+    ini.Set(ProgressIniSection, "pointToPointThrustUsePercent", pointToPointThrustUsePercent.ToString("R"));
     ini.Set(ProgressIniSection, "depthMode", (int)depthMode);
     ini.Set(ProgressIniSection, "areaMiningMode", areaMiningMode ? "1" : "0");
     ini.Set(ProgressIniSection, "areaLaneIndex", areaLaneIndex);
@@ -6803,6 +6936,10 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathRecordingPaused", pathRecordingPaused ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordingWaitReturn", pathRecordingWaitReturn ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordingStartPendingAfterUndock", pathRecordingStartPendingAfterUndock ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathRecordAsteroidDenseActive", pathRecordAsteroidDenseActive ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathRecordAsteroidAutoChangedMeters", pathRecordAsteroidAutoChangedMeters ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathRecordAsteroidManualOverride", pathRecordAsteroidManualOverride ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathRecordAsteroidClearPolls", pathRecordAsteroidClearPolls);
     ini.Set(ProgressIniSection, "pathRecordLastPos", V3ToString(pathRecordLastPos));
     ini.Set(ProgressIniSection, "pathRecordCounter", pathRecordCounter);
     ini.Set(ProgressIniSection, "pathRecordMineCounter", pathRecordMineCounter);
@@ -6889,6 +7026,8 @@ void LoadState()
     if (TryParseV3(StateString(ini, "drillAxis", V3ToString(drillAxis)), out v)) drillAxis = v;
     if (double.TryParse(StateString(ini, "laneDepth", laneDepth.ToString("R")), out d)) laneDepth = d;
     if (double.TryParse(StateString(ini, "activeMaxSpeed", activeMaxSpeed.ToString("R")), out d)) activeMaxSpeed = d;
+    if (double.TryParse(StateString(ini, "pointToPointAccelerationLimit", pointToPointAccelerationLimit.ToString("R")), out d)) pointToPointAccelerationLimit = Math.Max(0.1, d);
+    if (double.TryParse(StateString(ini, "pointToPointThrustUsePercent", pointToPointThrustUsePercent.ToString("R")), out d)) pointToPointThrustUsePercent = MathHelper.Clamp(d, 1, 100);
     if (int.TryParse(StateString(ini, "depthMode", ((int)depthMode).ToString()), out n)) depthMode = (DepthMode)n;
     areaMiningMode = StateBool(ini, "areaMiningMode", areaMiningMode);
     if (int.TryParse(StateString(ini, "areaLaneIndex", areaLaneIndex.ToString()), out n)) areaLaneIndex = n;
@@ -6948,6 +7087,11 @@ void LoadState()
     pathRecordingPaused = StateBool(ini, "pathRecordingPaused", pathRecordingPaused);
     pathRecordingWaitReturn = StateBool(ini, "pathRecordingWaitReturn", pathRecordingWaitReturn);
     pathRecordingStartPendingAfterUndock = StateBool(ini, "pathRecordingStartPendingAfterUndock", pathRecordingStartPendingAfterUndock);
+    pathRecordAsteroidDenseActive = StateBool(ini, "pathRecordAsteroidDenseActive", pathRecordAsteroidDenseActive);
+    pathRecordAsteroidAutoChangedMeters = StateBool(ini, "pathRecordAsteroidAutoChangedMeters", pathRecordAsteroidAutoChangedMeters);
+    pathRecordAsteroidManualOverride = StateBool(ini, "pathRecordAsteroidManualOverride", pathRecordAsteroidManualOverride);
+    if (int.TryParse(StateString(ini, "pathRecordAsteroidClearPolls", pathRecordAsteroidClearPolls.ToString()), out n))
+        pathRecordAsteroidClearPolls = Math.Max(0, n);
     if (TryParseV3(StateString(ini, "pathRecordLastPos", V3ToString(pathRecordLastPos)), out v)) pathRecordLastPos = v;
     if (int.TryParse(StateString(ini, "pathRecordCounter", pathRecordCounter.ToString()), out n)) pathRecordCounter = n;
     if (int.TryParse(StateString(ini, "pathRecordMineCounter", pathRecordMineCounter.ToString()), out n)) pathRecordMineCounter = n;
