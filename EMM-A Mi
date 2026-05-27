@@ -1257,9 +1257,20 @@ void AppendMinerRows(StringBuilder sb)
         AppendMinerMenuRow(sb, "Finish path", 3, false);
         AppendMinerMenuRow(sb, "  Undo path", 4, false);
         AppendMinerMenuRow(sb, "  Cancel path", 5, false);
-        sb.AppendLine();
-        sb.AppendLine(" Save memory by increasing the");
-        sb.AppendLine(" distance between path points. ");
+        if (miMenuIndex == 2)
+        {
+            sb.AppendLine();
+            sb.AppendLine(" Save memory by increasing the");
+            sb.AppendLine(" distance between path points. ");
+        }
+        else
+        {
+            sb.AppendLine();
+            sb.AppendLine();
+            sb.AppendLine();
+        }
+        sb.Append(" ");
+        sb.AppendLine("Current size: " + GetPathTimerCustomDataSizeText());
         return;
     }
 
@@ -1409,7 +1420,13 @@ string GetMinerFooterInfo()
         if (settingIndex == 10) return "Set hydrogen return threshold.";
     }
     if (miLcdMenu == MiLcdMenu.RecordPath)
-        return "Current size: " + GetPathTimerCustomDataSizeText();
+    {
+        if (miMenuIndex == 1) return "Save current mine pose.";
+        if (miMenuIndex == 2) return "Meters between points.";
+        if (miMenuIndex == 3) return "Finish path within 50 m of dock.";
+        if (miMenuIndex == 4) return "Remove last recorded section.";
+        if (miMenuIndex == 5) return "Cancel and clear this path.";
+    }
     if (miLcdMenu == MiLcdMenu.SetMinePose)
     {
         if (miMenuIndex == 1) return "Save first mining corner.";
