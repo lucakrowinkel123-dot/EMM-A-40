@@ -1262,12 +1262,6 @@ void AppendMinerRows(StringBuilder sb)
             sb.AppendLine(" Save memory by increasing the");
             sb.AppendLine(" distance between path points. ");
         }
-        else
-        {
-            sb.AppendLine();
-            sb.AppendLine();
-            sb.AppendLine();
-        }
         sb.Append(" ");
         sb.AppendLine("Current size: " + GetPathTimerCustomDataSizeText());
         return;
