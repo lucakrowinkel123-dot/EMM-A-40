@@ -691,6 +691,8 @@ bool TryHandleCarrierLcdCommand(string trimmed)
             CancelCarrierEdit();
         else if (caLcdMenu == CaLcdMenu.ThrustLimit)
             CloseCarrierThrustLimitMenu();
+        else if (caLcdMenu == CaLcdMenu.SelectOres)
+            BackToCarrierAutonomousMiningMenu();
         else
         {
             caLcdMenu = CaLcdMenu.Main;
@@ -765,6 +767,11 @@ void SelectCarrierCursor()
 
     if (caMenuIndex == 0)
     {
+        if (caLcdMenu == CaLcdMenu.SelectOres)
+        {
+            BackToCarrierAutonomousMiningMenu();
+            return;
+        }
         OpenCarrierMenu(CaLcdMenu.Main);
         return;
     }
@@ -854,6 +861,12 @@ void OpenCarrierMenu(CaLcdMenu menu)
     if (menu == CaLcdMenu.BehaviorSettings)
         caBehaviorPage = 0;
     CancelCarrierEdit();
+}
+
+void BackToCarrierAutonomousMiningMenu()
+{
+    OpenCarrierMenu(CaLcdMenu.AutonomousMining);
+    caMenuIndex = 2;
 }
 
 void OpenCarrierThrustLimitMenu()
@@ -1295,6 +1308,8 @@ string GetCarrierFooterInfo()
         if (caMenuIndex == 2) return "Adjust carrier behavior.";
         if (caMenuIndex == 3) return "Show carrier stats.";
     }
+    if (caLcdMenu == CaLcdMenu.SelectOres && caMenuIndex == 0)
+        return "Back to Autonomous mining.";
     if (caMenuIndex == 0 && caLcdMenu != CaLcdMenu.ThrustLimit)
         return "Return to EMM-A main menu.";
     if (caLcdMenu == CaLcdMenu.AutonomousMining)
