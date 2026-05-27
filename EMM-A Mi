@@ -1259,7 +1259,6 @@ void AppendMinerRows(StringBuilder sb)
         AppendMinerMenuRow(sb, "  Cancel path", 5, false);
         if (miMenuIndex == 2)
         {
-            sb.AppendLine();
             sb.AppendLine(" Save memory by increasing the");
             sb.AppendLine(" distance between path points. ");
         }
