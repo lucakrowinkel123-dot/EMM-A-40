@@ -1646,14 +1646,39 @@ int CountAsteroidsInZoneDbTimer(IMyTimerBlock timer)
 {
     if (timer == null)
         return 0;
+    string[] lines = (timer.CustomData ?? "").Replace("\r", "").Split('\n');
     int count = 0;
-    foreach (string line in (timer.CustomData ?? "").Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+    for (int i = 0; i < lines.Length; i++)
     {
         int asteroidNum;
-        if (IsAsteroidLabelLine(line.Trim(), out asteroidNum))
+        if (IsZoneDbAsteroidHeaderAt(lines, i, out asteroidNum))
             count++;
     }
     return count;
+}
+
+bool IsZoneDbAsteroidHeaderAt(string[] lines, int index, out int asteroidNum)
+{
+    asteroidNum = 0;
+    if (lines == null || index < 0 || index >= lines.Length)
+        return false;
+
+    string line = (lines[index] ?? "").Trim();
+    if (IsAsteroidLabelLine(line, out asteroidNum))
+    {
+        for (int i = index + 1; i < lines.Length; i++)
+        {
+            string next = (lines[i] ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(next))
+                continue;
+            int nextNum;
+            if (IsAsteroidLabelLine(next, out nextNum))
+                return false;
+            Vector3D pos, forward, up;
+            return TryParseCarrierAnchorLine(next, out pos, out forward, out up);
+        }
+    }
+    return false;
 }
 
 string FormatDatabaseDisplayName(string customName, string displayPrefixToTrim)
