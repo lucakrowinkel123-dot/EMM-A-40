@@ -207,6 +207,7 @@ PathRecordMineStage pathRecordMineStage = PathRecordMineStage.Idle;
 bool resumePathRecordingAfterMineArea = false;
 bool pathRecordMinePreviewActive = false;
 bool pathRecordMineConfirmPending = false;
+bool pathRecordMineConfirmHoldActive = false;
 string pathRecordPendingMineAreaLine = "";
 bool pathRecordMineCorrectionThrustActive = false;
 bool pathRecordMineGyroOverrideActive = false;
@@ -809,8 +810,16 @@ void SelectMinerCursor()
                 }
                 return;
             }
+            if (IsExcavationZoneActive())
+            {
+                OpenMinerMenu(MiLcdMenu.MineArea);
+                miMenuIndex = 1;
+                return;
+            }
             if (PathTimerHasRecordedPath())
+            {
                 StartPathRecordContinue("pathrecordcontinue");
+            }
             else
                 StartPathRecording("pathrecordstart");
             OpenMinerMenu(MiLcdMenu.RecordPath);
@@ -1325,7 +1334,7 @@ void AppendMinerRows(StringBuilder sb)
         else
             sb.AppendLine();
         if (appendPathActive)
-            sb.AppendLine("-  Append Path");
+            sb.AppendLine("   Appending path.");
         else
             AppendMinerMenuRow(sb, "Append Path", GetFollowPathAppendIndex(), false);
         if (appendPathActive)
@@ -1333,7 +1342,6 @@ void AppendMinerRows(StringBuilder sb)
             sb.AppendLine("   Miner will stop at last Excavation");
             sb.AppendLine("   site.");
         }
-        sb.AppendLine();
         sb.AppendLine("   Path running " + GetLoadingSymbol());
         sb.AppendLine("   Remaining " + GetPathRemainingText());
         return;
@@ -1685,7 +1693,13 @@ string GetPathRemainingText()
 
 bool IsExcavationZoneActive()
 {
-    return miningEnabled || areaMiningMode || returnToMinePoseAfterArea || pathRecordingWaitReturn;
+    return miningEnabled ||
+           areaMiningMode ||
+           returnToMinePoseAfterArea ||
+           pathRecordingWaitReturn ||
+           pathRecordMineConfirmPending ||
+           pathRecordMineStage != PathRecordMineStage.Idle ||
+           mineAreaAdjustStage != MineAreaAdjustStage.None;
 }
 
 int GetFollowPathAppendIndex()
@@ -2240,6 +2254,7 @@ void RemoteCommand (string command)
             resumePathRecordingAfterMineArea = false;
             pathRecordMinePreviewActive = false;
             pathRecordMineConfirmPending = false;
+            pathRecordMineConfirmHoldActive = false;
             pathRecordPendingMineAreaLine = "";
             mineAreaAdjustStage = MineAreaAdjustStage.None;
             mineAreaAdjustmentDirty = false;
@@ -2413,6 +2428,8 @@ string GetMainPathMenuText()
         return "Path follow tools.";
     if (IsPathRecordingFlowActive())
         return "Path recording tools";
+    if (IsExcavationZoneActive())
+        return "Excavation Zone";
     return PathTimerHasRecordedPath() ? "Continue recording path" : "Record path";
 }
 
@@ -2435,6 +2452,13 @@ void StartPathRecording(string command)
 
 void StartPathRecordContinue(string command)
 {
+    if (IsExcavationZoneActive())
+    {
+        Echo("Path recording continue denied: Excavation Zone is active.");
+        OpenMinerMenu(MiLcdMenu.MineArea);
+        miMenuIndex = 1;
+        return;
+    }
     StartPathRecordingCore(command);
 }
 
@@ -2477,6 +2501,7 @@ void BeginPathRecording()
     pathRecordingWaitReturn = false;
     pathRecordMineStage = PathRecordMineStage.Idle;
     pathRecordMineCorrectionThrustActive = false;
+    pathRecordMineConfirmHoldActive = false;
     ClearPathRecordMineGyroOverride();
     pathRecordLastPos = rc.GetPosition();
     // Seed the anchor header now so it exists before any path points are appended.
@@ -2488,6 +2513,7 @@ void BeginPathRecording()
 void StopPathRecording()
 {
     bool reverseWasActive = pathRecordReverseMode != PathRecordReverseMode.None;
+    ReleasePathRecordMineConfirmHold();
     ClearPathRecordReverseState();
     pathRecordingEnabled = false;
     pathRecordingPaused = false;
@@ -2497,6 +2523,7 @@ void StopPathRecording()
     resumePathRecordingAfterMineArea = false;
     pathRecordMinePreviewActive = false;
     pathRecordMineConfirmPending = false;
+    pathRecordMineConfirmHoldActive = false;
     pathRecordPendingMineAreaLine = "";
     mineAreaAdjustStage = MineAreaAdjustStage.None;
     mineAreaAdjustmentDirty = false;
@@ -2555,7 +2582,15 @@ bool UpdatePathRecordState()
             {
                 pathRecordMinePreviewActive = false;
                 pathRecordMineConfirmPending = true;
+                pathRecordMineConfirmHoldActive = true;
                 pathRecordingPaused = true;
+                targetPosition = pathRecordMineEntry;
+                desiredUp = pathRecordMineUp;
+                desiredForward = pathRecordMineForward;
+                hasTarget = true;
+                autopilotEnabled = true;
+                activeMaxSpeed = SPEEDB;
+                SetCockpitGyroControl(false);
                 OpenMinerMenu(MiLcdMenu.ConfirmExcavationZone);
                 miMenuIndex = 0;
                 Echo("Excavation Zone preview complete. Confirm or adjust.");
@@ -2893,6 +2928,7 @@ void CompletePathRecordReverseReturn()
         resumePathRecordingAfterMineArea = false;
         pathRecordMinePreviewActive = false;
         pathRecordMineConfirmPending = false;
+        pathRecordMineConfirmHoldActive = false;
         pathRecordPendingMineAreaLine = "";
         pathRecordMineCorrectionThrustActive = false;
         ClearPathRecordMineGyroOverride();
@@ -2910,6 +2946,7 @@ void CompletePathRecordReverseReturn()
     resumePathRecordingAfterMineArea = false;
     pathRecordMinePreviewActive = false;
     pathRecordMineConfirmPending = false;
+    pathRecordMineConfirmHoldActive = false;
     pathRecordPendingMineAreaLine = "";
     pathRecordMineCorrectionThrustActive = false;
     ClearPathRecordMineGyroOverride();
@@ -2932,6 +2969,7 @@ bool IsWithinDockRangeForPathCancel()
 
 void CancelPathRecordingWithoutReverse()
 {
+    ReleasePathRecordMineConfirmHold();
     ClearPathRecordReverseState();
     pathRecordingEnabled = false;
     pathRecordingPaused = false;
@@ -2940,6 +2978,7 @@ void CancelPathRecordingWithoutReverse()
     resumePathRecordingAfterMineArea = false;
     pathRecordMinePreviewActive = false;
     pathRecordMineConfirmPending = false;
+    pathRecordMineConfirmHoldActive = false;
     pathRecordPendingMineAreaLine = "";
     pathRecordMineCorrectionThrustActive = false;
     ClearPathRecordMineGyroOverride();
@@ -3591,11 +3630,25 @@ bool TrimPathTimerAfterRecord(int recordIndexInclusive)
     return ok;
 }
 
+void ReleasePathRecordMineConfirmHold()
+{
+    if (!pathRecordMineConfirmHoldActive)
+        return;
+
+    pathRecordMineConfirmHoldActive = false;
+    autopilotEnabled = false;
+    hasTarget = false;
+    activeMaxSpeed = 0;
+    SetCockpitGyroControl(true);
+    ResetMovement();
+}
+
 void ConfirmRecordedExcavationZone()
 {
     if (!pathRecordMineConfirmPending)
         return;
 
+    ReleasePathRecordMineConfirmHold();
     pathRecordMineConfirmPending = false;
     pathRecordingPaused = false;
     pathRecordMineStage = PathRecordMineStage.Idle;
@@ -3615,6 +3668,7 @@ void CancelRecordedExcavationZone()
     if (!pathRecordMineConfirmPending)
         return;
 
+    ReleasePathRecordMineConfirmHold();
     RemovePathTimerLine(pathRecordPendingMineAreaLine);
     pathRecordMineConfirmPending = false;
     pathRecordingPaused = false;
@@ -6607,6 +6661,7 @@ void SaveState()
     ini.Set(StateIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(StateIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
     ini.Set(StateIniSection, "resumePathRecordingAfterMineArea", resumePathRecordingAfterMineArea ? "1" : "0");
+    ini.Set(StateIniSection, "pathRecordMineConfirmHoldActive", pathRecordMineConfirmHoldActive ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordReverseMode", (int)pathRecordReverseMode);
     ini.Set(StateIniSection, "pathRecordReverseIndex", pathRecordReverseIndex);
     ini.Set(StateIniSection, "pathRecordReverseKeepLineCount", pathRecordReverseKeepLineCount);
@@ -6724,6 +6779,7 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(ProgressIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
     ini.Set(ProgressIniSection, "resumePathRecordingAfterMineArea", resumePathRecordingAfterMineArea ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathRecordMineConfirmHoldActive", pathRecordMineConfirmHoldActive ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordReverseMode", (int)pathRecordReverseMode);
     ini.Set(ProgressIniSection, "pathRecordReverseIndex", pathRecordReverseIndex);
     ini.Set(ProgressIniSection, "pathRecordReverseKeepLineCount", pathRecordReverseKeepLineCount);
@@ -6868,6 +6924,7 @@ void LoadState()
         ini,
         "resumePathRecordingAfterMineArea",
         StateBool(ini, "autoMinedFromPathRecord", resumePathRecordingAfterMineArea));
+    pathRecordMineConfirmHoldActive = StateBool(ini, "pathRecordMineConfirmHoldActive", pathRecordMineConfirmHoldActive);
     if (int.TryParse(StateString(ini, "pathRecordReverseMode", ((int)pathRecordReverseMode).ToString()), out n))
     {
         if (n < 0 || n > (int)PathRecordReverseMode.Cancel)
