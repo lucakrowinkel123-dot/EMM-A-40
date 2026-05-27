@@ -6768,6 +6768,8 @@ void SaveState()
     ini.Set(StateIniSection, "drillAxis", V3ToString(drillAxis));
     ini.Set(StateIniSection, "laneDepth", laneDepth.ToString("R"));
     ini.Set(StateIniSection, "activeMaxSpeed", activeMaxSpeed.ToString("R"));
+    ini.Set(StateIniSection, "pointToPointAccelerationLimit", pointToPointAccelerationLimit.ToString("R"));
+    ini.Set(StateIniSection, "pointToPointThrustUsePercent", pointToPointThrustUsePercent.ToString("R"));
     ini.Set(StateIniSection, "depthMode", (int)depthMode);
     ini.Set(StateIniSection, "areaMiningMode", areaMiningMode ? "1" : "0");
     ini.Set(StateIniSection, "areaLaneIndex", areaLaneIndex);
@@ -6901,6 +6903,8 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "drillAxis", V3ToString(drillAxis));
     ini.Set(ProgressIniSection, "laneDepth", laneDepth.ToString("R"));
     ini.Set(ProgressIniSection, "activeMaxSpeed", activeMaxSpeed.ToString("R"));
+    ini.Set(ProgressIniSection, "pointToPointAccelerationLimit", pointToPointAccelerationLimit.ToString("R"));
+    ini.Set(ProgressIniSection, "pointToPointThrustUsePercent", pointToPointThrustUsePercent.ToString("R"));
     ini.Set(ProgressIniSection, "depthMode", (int)depthMode);
     ini.Set(ProgressIniSection, "areaMiningMode", areaMiningMode ? "1" : "0");
     ini.Set(ProgressIniSection, "areaLaneIndex", areaLaneIndex);
@@ -7022,6 +7026,8 @@ void LoadState()
     if (TryParseV3(StateString(ini, "drillAxis", V3ToString(drillAxis)), out v)) drillAxis = v;
     if (double.TryParse(StateString(ini, "laneDepth", laneDepth.ToString("R")), out d)) laneDepth = d;
     if (double.TryParse(StateString(ini, "activeMaxSpeed", activeMaxSpeed.ToString("R")), out d)) activeMaxSpeed = d;
+    if (double.TryParse(StateString(ini, "pointToPointAccelerationLimit", pointToPointAccelerationLimit.ToString("R")), out d)) pointToPointAccelerationLimit = Math.Max(0.1, d);
+    if (double.TryParse(StateString(ini, "pointToPointThrustUsePercent", pointToPointThrustUsePercent.ToString("R")), out d)) pointToPointThrustUsePercent = MathHelper.Clamp(d, 1, 100);
     if (int.TryParse(StateString(ini, "depthMode", ((int)depthMode).ToString()), out n)) depthMode = (DepthMode)n;
     areaMiningMode = StateBool(ini, "areaMiningMode", areaMiningMode);
     if (int.TryParse(StateString(ini, "areaLaneIndex", areaLaneIndex.ToString()), out n)) areaLaneIndex = n;
