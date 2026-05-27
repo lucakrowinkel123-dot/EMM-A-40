@@ -1373,8 +1373,11 @@ void AppendMinerRows(StringBuilder sb)
 
 void AppendMinerFooter(StringBuilder sb)
 {
-    while (CountMinerLines(sb) < 11)
-        sb.AppendLine();
+    if (miLcdMenu != MiLcdMenu.RecordPath)
+    {
+        while (CountMinerLines(sb) < 11)
+            sb.AppendLine();
+    }
     sb.AppendLine("—————————————————");
     sb.Append(" ");
     sb.AppendLine(GetMinerFooterInfo());
