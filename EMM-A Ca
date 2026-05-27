@@ -2351,8 +2351,7 @@ List<NumberedTimerEntry> GetZoneDbTimersSorted(ZoneDescriptor zone)
         return result;
 
     string familyPrefix;
-    int ignoredIndex;
-    if (!TryGetNumberedTimerFamily(zone.TimerName, out familyPrefix, out ignoredIndex))
+    if (!TryGetZoneDbFamilyPrefix(zone.TimerName, out familyPrefix))
         return result;
 
     foreach (var t in GetTimerBlocksCached())
@@ -2369,6 +2368,21 @@ List<NumberedTimerEntry> GetZoneDbTimersSorted(ZoneDescriptor zone)
     }
     result.Sort((a, b) => a.Index.CompareTo(b.Index));
     return result;
+}
+
+bool TryGetZoneDbFamilyPrefix(string registryTimerText, out string familyPrefix)
+{
+    familyPrefix = "";
+    if (string.IsNullOrWhiteSpace(registryTimerText))
+        return false;
+
+    string text = registryTimerText.Trim();
+    int numberedIndex;
+    if (TryGetNumberedTimerFamily(text, out familyPrefix, out numberedIndex))
+        return true;
+
+    familyPrefix = text.EndsWith(" ", StringComparison.Ordinal) ? text : text + " ";
+    return true;
 }
 
 string BuildCombinedZoneDbText(List<NumberedTimerEntry> timers)
@@ -3911,7 +3925,9 @@ bool TryParseZoneDescriptor(string sectionName, MyIni ini, out ZoneDescriptor zo
 {
     zone = null;
 
-    string timerName = ini.Get(sectionName, "Timer").ToString("").Trim();
+    string timerName = ini.Get(sectionName, "Timers").ToString("").Trim();
+    if (string.IsNullOrWhiteSpace(timerName))
+        timerName = ini.Get(sectionName, "Timer").ToString("").Trim();
     string centerText = ini.Get(sectionName, "Center").ToString("").Trim();
     double radius = ini.Get(sectionName, "Radius").ToDouble(-1);
     if (string.IsNullOrWhiteSpace(timerName) || string.IsNullOrWhiteSpace(centerText) || radius <= 0)
