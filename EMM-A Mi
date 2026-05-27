@@ -896,6 +896,12 @@ void SelectMinerCursor()
 
     if (miLcdMenu == MiLcdMenu.RecordPath && miMenuIndex == 1)
     {
+        if (pathRecordMineConfirmPending)
+        {
+            OpenMinerMenu(MiLcdMenu.ConfirmExcavationZone);
+            miMenuIndex = 0;
+            return;
+        }
         if (IsExcavationZoneActive())
         {
             OpenMinerMenu(MiLcdMenu.MineArea);
@@ -1278,7 +1284,7 @@ void AppendMinerRows(StringBuilder sb)
 
     if (miLcdMenu == MiLcdMenu.RecordPath)
     {
-        AppendMinerMenuRow(sb, IsExcavationZoneActive() ? "Excavation Zone" : "Set mine pose", 1, false);
+        AppendMinerMenuRow(sb, GetRecordPathExcavationMenuText(), 1, false);
         AppendMinerRecordMetersRow(sb, 2);
         AppendMinerMenuRow(sb, "Finish path", 3, false);
         AppendMinerMenuRow(sb, "  Undo path", 4, false);
@@ -1447,7 +1453,11 @@ string GetMinerFooterInfo()
     }
     if (miLcdMenu == MiLcdMenu.RecordPath)
     {
-        if (miMenuIndex == 1) return IsExcavationZoneActive() ? "Open Excavation Zone tools." : "Save current mine pose.";
+        if (miMenuIndex == 1)
+        {
+            if (pathRecordMineConfirmPending) return "Confirm/adjust Excavation Zone.";
+            return IsExcavationZoneActive() ? "Open Excavation Zone tools." : "Save current mine pose.";
+        }
         if (miMenuIndex == 2) return "Meters between points.";
         if (miMenuIndex == 3) return "Finish path within 50 m of dock.";
         if (miMenuIndex == 4) return "Remove last recorded section.";
@@ -1689,6 +1699,15 @@ string GetLoadingSymbol()
 string GetPathRemainingText()
 {
     return "--:--";
+}
+
+string GetRecordPathExcavationMenuText()
+{
+    if (pathRecordMineConfirmPending)
+        return "Confirm Excavation Zone";
+    if (IsExcavationZoneActive())
+        return "Excavation Zone";
+    return "Set mine pose";
 }
 
 bool IsExcavationZoneActive()
@@ -2582,15 +2601,7 @@ bool UpdatePathRecordState()
             {
                 pathRecordMinePreviewActive = false;
                 pathRecordMineConfirmPending = true;
-                pathRecordMineConfirmHoldActive = true;
-                pathRecordingPaused = true;
-                targetPosition = pathRecordMineEntry;
-                desiredUp = pathRecordMineUp;
-                desiredForward = pathRecordMineForward;
-                hasTarget = true;
-                autopilotEnabled = true;
-                activeMaxSpeed = SPEEDB;
-                SetCockpitGyroControl(false);
+                ArmPathRecordMineConfirmHold();
                 OpenMinerMenu(MiLcdMenu.ConfirmExcavationZone);
                 miMenuIndex = 0;
                 Echo("Excavation Zone preview complete. Confirm or adjust.");
@@ -3643,6 +3654,24 @@ void ReleasePathRecordMineConfirmHold()
     ResetMovement();
 }
 
+void ArmPathRecordMineConfirmHold()
+{
+    if (!pathRecordMineConfirmPending)
+        return;
+
+    pathRecordMineConfirmHoldActive = true;
+    pathRecordingPaused = true;
+    pathRecordingWaitReturn = false;
+    pathRecordMineStage = PathRecordMineStage.Idle;
+    targetPosition = pathRecordMineEntry;
+    desiredUp = pathRecordMineUp.LengthSquared() > 0.001 ? pathRecordMineUp : Vector3D.Normalize(rc.WorldMatrix.Up);
+    desiredForward = pathRecordMineForward.LengthSquared() > 0.001 ? pathRecordMineForward : Vector3D.Normalize(rc.WorldMatrix.Forward);
+    hasTarget = true;
+    autopilotEnabled = true;
+    activeMaxSpeed = SPEEDB;
+    SetCockpitGyroControl(false);
+}
+
 void ConfirmRecordedExcavationZone()
 {
     if (!pathRecordMineConfirmPending)
@@ -3710,6 +3739,7 @@ void ConfirmCurrentExcavationZoneAdjustment()
 {
     if (pathRecordMineConfirmPending)
     {
+        ReleasePathRecordMineConfirmHold();
         if (!RewriteCurrentMineAreaRecord(false))
             Echo("Excavation Zone confirm warning: could not rewrite path timer.");
         ConfirmRecordedExcavationZone();
@@ -3737,6 +3767,7 @@ void ConfirmCurrentExcavationZoneAdjustment()
 
 void StartMineAreaCornerAdjustment(bool cornerA)
 {
+    ReleasePathRecordMineConfirmHold();
     if (!areaPlanValid)
     {
         Echo("Adjust denied: no Excavation Zone is loaded.");
@@ -6661,7 +6692,10 @@ void SaveState()
     ini.Set(StateIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(StateIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
     ini.Set(StateIniSection, "resumePathRecordingAfterMineArea", resumePathRecordingAfterMineArea ? "1" : "0");
+    ini.Set(StateIniSection, "pathRecordMinePreviewActive", pathRecordMinePreviewActive ? "1" : "0");
+    ini.Set(StateIniSection, "pathRecordMineConfirmPending", pathRecordMineConfirmPending ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordMineConfirmHoldActive", pathRecordMineConfirmHoldActive ? "1" : "0");
+    ini.Set(StateIniSection, "pathRecordPendingMineAreaLine", pathRecordPendingMineAreaLine);
     ini.Set(StateIniSection, "pathRecordReverseMode", (int)pathRecordReverseMode);
     ini.Set(StateIniSection, "pathRecordReverseIndex", pathRecordReverseIndex);
     ini.Set(StateIniSection, "pathRecordReverseKeepLineCount", pathRecordReverseKeepLineCount);
@@ -6779,7 +6813,10 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathRecordMineForward", V3ToString(pathRecordMineForward));
     ini.Set(ProgressIniSection, "pathRecordMineStage", (int)pathRecordMineStage);
     ini.Set(ProgressIniSection, "resumePathRecordingAfterMineArea", resumePathRecordingAfterMineArea ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathRecordMinePreviewActive", pathRecordMinePreviewActive ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathRecordMineConfirmPending", pathRecordMineConfirmPending ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordMineConfirmHoldActive", pathRecordMineConfirmHoldActive ? "1" : "0");
+    ini.Set(ProgressIniSection, "pathRecordPendingMineAreaLine", pathRecordPendingMineAreaLine);
     ini.Set(ProgressIniSection, "pathRecordReverseMode", (int)pathRecordReverseMode);
     ini.Set(ProgressIniSection, "pathRecordReverseIndex", pathRecordReverseIndex);
     ini.Set(ProgressIniSection, "pathRecordReverseKeepLineCount", pathRecordReverseKeepLineCount);
@@ -6924,7 +6961,16 @@ void LoadState()
         ini,
         "resumePathRecordingAfterMineArea",
         StateBool(ini, "autoMinedFromPathRecord", resumePathRecordingAfterMineArea));
+    pathRecordMinePreviewActive = StateBool(ini, "pathRecordMinePreviewActive", pathRecordMinePreviewActive);
+    pathRecordMineConfirmPending = StateBool(ini, "pathRecordMineConfirmPending", pathRecordMineConfirmPending);
     pathRecordMineConfirmHoldActive = StateBool(ini, "pathRecordMineConfirmHoldActive", pathRecordMineConfirmHoldActive);
+    pathRecordPendingMineAreaLine = StateString(ini, "pathRecordPendingMineAreaLine", pathRecordPendingMineAreaLine);
+    if (pathRecordMineConfirmPending)
+    {
+        OpenMinerMenu(MiLcdMenu.RecordPath);
+        miMenuIndex = 1;
+        ArmPathRecordMineConfirmHold();
+    }
     if (int.TryParse(StateString(ini, "pathRecordReverseMode", ((int)pathRecordReverseMode).ToString()), out n))
     {
         if (n < 0 || n > (int)PathRecordReverseMode.Cancel)
