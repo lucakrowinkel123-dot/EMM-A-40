@@ -6143,10 +6143,8 @@ class GyroControl
 
         if (forward != Vector3D.Zero)
         {
-            Quaternion quat    = Quaternion.CreateFromForwardUp(current.Forward, current.Up);
-            Quaternion invQuat = Quaternion.Inverse(quat);
-            Vector3D rcRef     = Vector3D.Transform(forward, invQuat);
-            Vector3D.GetAzimuthAndElevation(rcRef, out error.Y, out error.X);
+            error.X = SignedAngleOnPlane(current.Forward, forward, current.Right, current.Up, false);
+            error.Y = SignedAngleOnPlane(current.Forward, forward, current.Up, current.Right, true);
         }
 
         if (up != Vector3D.Zero)
@@ -6219,6 +6217,20 @@ class GyroControl
     {
         double r = Vector3D.Dot(value, guide);
         return double.IsNaN(r) ? 0 : r;
+    }
+
+    static double SignedAngleOnPlane(Vector3D from, Vector3D to, Vector3D planeNormal, Vector3D signGuide, bool negateWhenPositive)
+    {
+        Vector3D flat = VectorRejection(to, planeNormal);
+        if (flat.LengthSquared() < 1e-12)
+            return 0;
+        flat = Vector3D.Normalize(flat);
+        double dot = MathHelper.Clamp(Vector3D.Dot(from, flat), -1, 1);
+        double angle = Math.Acos(dot);
+        double scaler = ScalerProjection(flat, signGuide);
+        if ((negateWhenPositive && scaler > 0) || (!negateWhenPositive && scaler < 0))
+            angle *= -1;
+        return angle;
     }
 
     static Vector3D VectorPojection(Vector3D value, Vector3D guide)
