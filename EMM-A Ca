@@ -1412,13 +1412,19 @@ string GetCarrierFooterInfo()
     {
         if (caMenuIndex == 0) return "Back to Databases menu.";
         if (caMenuIndex == 1 && GetDatabasePageCount(GetZoneDatabaseTimersSorted().Count) > 1) return "Show next Zone Database page.";
-        return CountZoneDbAsteroidsAcrossZones() + " Asteroids.";
+        NumberedTimerEntry selected;
+        if (TryGetSelectedDatabaseTimer(GetZoneDatabaseTimersSorted(), caZoneDatabasePage, caMenuIndex, out selected))
+            return CountAsteroidsInZoneDbTimer(selected.Timer) + " Asteroids.";
+        return CountZoneDbAsteroidsAcrossZones() + " Asteroids total.";
     }
     if (caLcdMenu == CaLcdMenu.AsteroidDatabases)
     {
         if (caMenuIndex == 0) return "Back to Databases menu.";
         if (caMenuIndex == 1 && GetDatabasePageCount(GetAsteroidDbTimersSorted().Count) > 1) return "Show next Asteroid Database page.";
-        return CountAsteroidDbRecords() + " Asteroids.";
+        NumberedTimerEntry selected;
+        if (TryGetSelectedDatabaseTimer(GetAsteroidDbTimersSorted(), caAsteroidDatabasePage, caMenuIndex, out selected))
+            return CountAsteroidsInAsteroidDbTimer(selected.Timer) + " Asteroids.";
+        return CountAsteroidDbRecords() + " Asteroids total.";
     }
     if (caLcdMenu == CaLcdMenu.Audit && caMenuIndex == 0)
         return "Back to Databases menu.";
@@ -1598,6 +1604,56 @@ void AppendDatabaseTimerRows(StringBuilder sb, List<NumberedTimerEntry> timers, 
         string name = entry.Timer == null ? "" : entry.Timer.CustomName;
         AppendCarrierMenuRow(sb, FormatDatabaseDisplayName(name, displayPrefixToTrim) + " | " + FormatCustomDataKb(entry.Timer), rowIndex + (i - start), false);
     }
+}
+
+bool TryGetSelectedDatabaseTimer(List<NumberedTimerEntry> timers, int page, int menuIndex, out NumberedTimerEntry selected)
+{
+    selected = null;
+    int total = timers == null ? 0 : timers.Count;
+    if (total <= 0)
+        return false;
+
+    int pages = GetDatabasePageCount(total);
+    int safePage = Math.Max(0, Math.Min(pages - 1, page));
+    int firstRowIndex = pages > 1 ? 2 : 1;
+    int rowOffset = menuIndex - firstRowIndex;
+    if (rowOffset < 0 || rowOffset >= databaseRowsPerPage)
+        return false;
+
+    int timerIndex = safePage * databaseRowsPerPage + rowOffset;
+    if (timerIndex < 0 || timerIndex >= total)
+        return false;
+
+    selected = timers[timerIndex];
+    return selected != null && selected.Timer != null;
+}
+
+int CountAsteroidsInAsteroidDbTimer(IMyTimerBlock timer)
+{
+    if (timer == null)
+        return 0;
+    int count = 0;
+    foreach (string line in (timer.CustomData ?? "").Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+    {
+        string trimmed = line.Trim();
+        if (trimmed.StartsWith("Asteroid ", StringComparison.OrdinalIgnoreCase))
+            count++;
+    }
+    return count;
+}
+
+int CountAsteroidsInZoneDbTimer(IMyTimerBlock timer)
+{
+    if (timer == null)
+        return 0;
+    int count = 0;
+    foreach (string line in (timer.CustomData ?? "").Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+    {
+        int asteroidNum;
+        if (IsAsteroidLabelLine(line.Trim(), out asteroidNum))
+            count++;
+    }
+    return count;
 }
 
 string FormatDatabaseDisplayName(string customName, string displayPrefixToTrim)
