@@ -16,9 +16,9 @@
 // TOFF r,u,f   : set target offset in local Right,Up,Forward meters
 // TOFFRESET    : reset target offset to 0,0,0
 // saveasteroid : simulate recompile, then save carrier pos, miner ore totals, and miner
-//                path into the next Asteroid Record slot across "EMM-A Ca Asteroid DB Axx"
-//                timers (asteroidsPerDb records each). Also updates the active zone's Zone DB
-//                selected from "EMM-A Ca Zone DB Registry". Clears the miner's path timer.
+//                path into the first numbered Asteroid DB timer with enough space for the
+//                whole record. Also updates the active numbered Zone DB family selected from
+//                "EMM-A Ca Zone DB Registry". Clears the miner's path timer.
 // Missing ore names are auto-added to timer "EMM-A Ca Ores" custom data
 // in format: <OreName> on
 // <OreName> on/off : set one ore row state in "EMM-A Ca Ores" (example: Iron off)
@@ -62,9 +62,10 @@ double TOFFU = 0;
 double TOFFF = 0;
 
 // ----- SaveAsteroid settings -----
-int    asteroidsPerDb    = 5;                      // how many Asteroid Records per DB timer
+int    dbCustomDataSoftCapChars = 61000;           // keep timer CustomData below the practical 64 KB cap
 string minerPathTimerTag = "EMM-A Mi Path";        // name tag of the miner's Path timer
-string asteroidDbTagPfx  = "EMM-A Ca Asteroid DB "; // prefix for Asteroid DB timer names
+string asteroidDbTagPfx  = "EMM-A Ca Asteroid DB "; // prefix for numbered Asteroid DB timer names
+string zoneDbTagPfx      = "EMM-A Ca Zone DB ";     // prefix for numbered Zone DB timer names
 string zoneRegistryTimerTag = "EMM-A Ca Zone DB Registry"; // exact name of the timer storing zone metadata
 string oreNameTimerTag   = "EMM-A Ca Ores";        // exact name of timer storing ore on/off rows
 string minerContainerTag = "EMM-A Mi ";            // name tag for miner cargo containers
@@ -236,11 +237,17 @@ const int carrierZoneStatsRefreshIntervalTicks = 60;
 int cachedAsteroidRuntimeNum = 0;
 bool cachedAsteroidRuntimeValid = false;
 int cachedAsteroidRuntimeTicks = 0;
+int caZoneDatabasePage = 0;
+int caAsteroidDatabasePage = 0;
+const int databaseRowsPerPage = 6;
 enum CaLcdMenu
 {
     Main,
     AutonomousMining,
     SelectOres,
+    Databases,
+    ZoneDatabases,
+    AsteroidDatabases,
     Audit,
     BehaviorSettings,
     ThrustLimit,
@@ -351,6 +358,12 @@ class ZoneDbNumberEntry
 {
     public int Number;
     public string ZoneName = "";
+}
+
+class NumberedTimerEntry
+{
+    public IMyTimerBlock Timer;
+    public int Index;
 }
 
 public Program()
@@ -693,6 +706,10 @@ bool TryHandleCarrierLcdCommand(string trimmed)
             CloseCarrierThrustLimitMenu();
         else if (caLcdMenu == CaLcdMenu.SelectOres)
             BackToCarrierAutonomousMiningMenu();
+        else if (caLcdMenu == CaLcdMenu.ZoneDatabases ||
+                caLcdMenu == CaLcdMenu.AsteroidDatabases ||
+                caLcdMenu == CaLcdMenu.Audit)
+            OpenCarrierMenu(CaLcdMenu.Databases);
         else
         {
             caLcdMenu = CaLcdMenu.Main;
@@ -719,6 +736,19 @@ int GetCarrierMenuItemCount()
     if (caLcdMenu == CaLcdMenu.Main) return 4;
     if (caLcdMenu == CaLcdMenu.AutonomousMining) return ShowRecallMinerMenuItem() ? 4 : 3;
     if (caLcdMenu == CaLcdMenu.SelectOres) return 1 + GetCarrierOreCount();
+    if (caLcdMenu == CaLcdMenu.Databases) return 4;
+    if (caLcdMenu == CaLcdMenu.ZoneDatabases)
+    {
+        int pages = GetDatabasePageCount(GetZoneDatabaseTimersSorted().Count);
+        int rows = GetDatabasePageItemCount(GetZoneDatabaseTimersSorted().Count, caZoneDatabasePage);
+        return 1 + (pages > 1 ? 1 : 0) + rows;
+    }
+    if (caLcdMenu == CaLcdMenu.AsteroidDatabases)
+    {
+        int pages = GetDatabasePageCount(GetAsteroidDbTimersSorted().Count);
+        int rows = GetDatabasePageItemCount(GetAsteroidDbTimersSorted().Count, caAsteroidDatabasePage);
+        return 1 + (pages > 1 ? 1 : 0) + rows;
+    }
     if (caLcdMenu == CaLcdMenu.BehaviorSettings)
     {
         if (caBehaviorPage == 0) return 8;
@@ -749,7 +779,7 @@ void SelectCarrierCursor()
             caMenuIndex = 1;
         }
         else if (caMenuIndex == 1)
-            StartCarrierAuditMenu();
+            OpenCarrierMenu(CaLcdMenu.Databases);
         else if (caMenuIndex == 2)
         {
             OpenCarrierMenu(CaLcdMenu.BehaviorSettings);
@@ -770,6 +800,13 @@ void SelectCarrierCursor()
         if (caLcdMenu == CaLcdMenu.SelectOres)
         {
             BackToCarrierAutonomousMiningMenu();
+            return;
+        }
+        if (caLcdMenu == CaLcdMenu.ZoneDatabases ||
+            caLcdMenu == CaLcdMenu.AsteroidDatabases ||
+            caLcdMenu == CaLcdMenu.Audit)
+        {
+            OpenCarrierMenu(CaLcdMenu.Databases);
             return;
         }
         OpenCarrierMenu(CaLcdMenu.Main);
@@ -826,6 +863,31 @@ void SelectCarrierCursor()
         return;
     }
 
+    if (caLcdMenu == CaLcdMenu.Databases)
+    {
+        if (caMenuIndex == 1)
+            OpenCarrierMenu(CaLcdMenu.ZoneDatabases);
+        else if (caMenuIndex == 2)
+            OpenCarrierMenu(CaLcdMenu.AsteroidDatabases);
+        else if (caMenuIndex == 3)
+            StartCarrierAuditMenu();
+        return;
+    }
+
+    if (caLcdMenu == CaLcdMenu.ZoneDatabases)
+    {
+        if (caMenuIndex == 1 && GetDatabasePageCount(GetZoneDatabaseTimersSorted().Count) > 1)
+            caZoneDatabasePage = (caZoneDatabasePage + 1) % GetDatabasePageCount(GetZoneDatabaseTimersSorted().Count);
+        return;
+    }
+
+    if (caLcdMenu == CaLcdMenu.AsteroidDatabases)
+    {
+        if (caMenuIndex == 1 && GetDatabasePageCount(GetAsteroidDbTimersSorted().Count) > 1)
+            caAsteroidDatabasePage = (caAsteroidDatabasePage + 1) % GetDatabasePageCount(GetAsteroidDbTimersSorted().Count);
+        return;
+    }
+
     if (caLcdMenu == CaLcdMenu.ThrustLimit)
     {
         if (caMenuIndex == 1)
@@ -860,6 +922,10 @@ void OpenCarrierMenu(CaLcdMenu menu)
     caMenuIndex = 0;
     if (menu == CaLcdMenu.BehaviorSettings)
         caBehaviorPage = 0;
+    if (menu == CaLcdMenu.ZoneDatabases)
+        caZoneDatabasePage = 0;
+    if (menu == CaLcdMenu.AsteroidDatabases)
+        caAsteroidDatabasePage = 0;
     CancelCarrierEdit();
 }
 
@@ -1022,7 +1088,7 @@ void AppendCarrierRows(StringBuilder sb)
     if (caLcdMenu == CaLcdMenu.Main)
     {
         AppendCarrierMenuRow(sb, "Autonomous mining", 0, false);
-        AppendCarrierMenuRow(sb, "Audit", 1, false);
+        AppendCarrierMenuRow(sb, "Databases", 1, false);
         AppendCarrierMenuRow(sb, "Behavior settings", 2, false);
         AppendCarrierMenuRow(sb, "Info", 3, false);
         return;
@@ -1070,6 +1136,26 @@ void AppendCarrierRows(StringBuilder sb)
             sb.Append("   ");
             sb.AppendLine("Distance: " + FormatCarrierMiningDistance());
         }
+        return;
+    }
+
+    if (caLcdMenu == CaLcdMenu.Databases)
+    {
+        AppendCarrierMenuRow(sb, "Zone Databases", 1, false);
+        AppendCarrierMenuRow(sb, "Asteroid Databases", 2, false);
+        AppendCarrierMenuRow(sb, "Audit", 3, false);
+        return;
+    }
+
+    if (caLcdMenu == CaLcdMenu.ZoneDatabases)
+    {
+        AppendDatabaseTimerRows(sb, GetZoneDatabaseTimersSorted(), "EMM-A Ca ", caZoneDatabasePage);
+        return;
+    }
+
+    if (caLcdMenu == CaLcdMenu.AsteroidDatabases)
+    {
+        AppendDatabaseTimerRows(sb, GetAsteroidDbTimersSorted(), "EMM-A Ca ", caAsteroidDatabasePage);
         return;
     }
 
@@ -1304,14 +1390,38 @@ string GetCarrierFooterInfo()
     if (caLcdMenu == CaLcdMenu.Main)
     {
         if (caMenuIndex == 0) return "Toggle asteroid mining.";
-        if (caMenuIndex == 1) return "Check asteroid database issues.";
+        if (caMenuIndex == 1) return "View databases.";
         if (caMenuIndex == 2) return "Adjust carrier behavior.";
         if (caMenuIndex == 3) return "Show carrier stats.";
     }
     if (caLcdMenu == CaLcdMenu.SelectOres && caMenuIndex == 0)
         return "Back to Autonomous mining.";
-    if (caMenuIndex == 0 && caLcdMenu != CaLcdMenu.ThrustLimit)
+    if (caMenuIndex == 0 &&
+        caLcdMenu != CaLcdMenu.ThrustLimit &&
+        caLcdMenu != CaLcdMenu.ZoneDatabases &&
+        caLcdMenu != CaLcdMenu.AsteroidDatabases &&
+        caLcdMenu != CaLcdMenu.Audit)
         return "Return to EMM-A main menu.";
+    if (caLcdMenu == CaLcdMenu.Databases)
+    {
+        if (caMenuIndex == 1) return "View all Zone Databases.";
+        if (caMenuIndex == 2) return "View all Asteroid Databases.";
+        if (caMenuIndex == 3) return "Check asteroid database issues.";
+    }
+    if (caLcdMenu == CaLcdMenu.ZoneDatabases)
+    {
+        if (caMenuIndex == 0) return "Back to Databases menu.";
+        if (caMenuIndex == 1 && GetDatabasePageCount(GetZoneDatabaseTimersSorted().Count) > 1) return "Show next Zone Database page.";
+        return CountZoneDbAsteroidsAcrossZones() + " Asteroids.";
+    }
+    if (caLcdMenu == CaLcdMenu.AsteroidDatabases)
+    {
+        if (caMenuIndex == 0) return "Back to Databases menu.";
+        if (caMenuIndex == 1 && GetDatabasePageCount(GetAsteroidDbTimersSorted().Count) > 1) return "Show next Asteroid Database page.";
+        return CountAsteroidDbRecords() + " Asteroids.";
+    }
+    if (caLcdMenu == CaLcdMenu.Audit && caMenuIndex == 0)
+        return "Back to Databases menu.";
     if (caLcdMenu == CaLcdMenu.AutonomousMining)
     {
         if (caMenuIndex == 1) return "Toggle asteroid mining.";
@@ -1449,6 +1559,61 @@ void AppendCarrierMenuRow(StringBuilder sb, string text, int index, bool isBack)
     else
         sb.Append("-  ");
     sb.AppendLine(text);
+}
+
+int GetDatabasePageCount(int itemCount)
+{
+    if (itemCount <= 0)
+        return 1;
+    return (itemCount + databaseRowsPerPage - 1) / databaseRowsPerPage;
+}
+
+int GetDatabasePageItemCount(int itemCount, int page)
+{
+    if (itemCount <= 0)
+        return 0;
+    int safePage = Math.Max(0, Math.Min(GetDatabasePageCount(itemCount) - 1, page));
+    int start = safePage * databaseRowsPerPage;
+    return Math.Max(0, Math.Min(databaseRowsPerPage, itemCount - start));
+}
+
+void AppendDatabaseTimerRows(StringBuilder sb, List<NumberedTimerEntry> timers, string displayPrefixToTrim, int page)
+{
+    int total = timers == null ? 0 : timers.Count;
+    int pages = GetDatabasePageCount(total);
+    int safePage = Math.Max(0, Math.Min(pages - 1, page));
+
+    if (pages > 1)
+        AppendCarrierMenuRow(sb, "Next page " + (safePage + 1) + "/" + pages, 1, false);
+    else
+        sb.AppendLine();
+    sb.AppendLine();
+
+    int rowIndex = pages > 1 ? 2 : 1;
+    int start = safePage * databaseRowsPerPage;
+    int end = Math.Min(total, start + databaseRowsPerPage);
+    for (int i = start; i < end; i++)
+    {
+        NumberedTimerEntry entry = timers[i];
+        string name = entry.Timer == null ? "" : entry.Timer.CustomName;
+        AppendCarrierMenuRow(sb, FormatDatabaseDisplayName(name, displayPrefixToTrim) + " | " + FormatCustomDataKb(entry.Timer), rowIndex + (i - start), false);
+    }
+}
+
+string FormatDatabaseDisplayName(string customName, string displayPrefixToTrim)
+{
+    string s = customName ?? "";
+    if (!string.IsNullOrWhiteSpace(displayPrefixToTrim) &&
+        s.StartsWith(displayPrefixToTrim, StringComparison.OrdinalIgnoreCase))
+        s = s.Substring(displayPrefixToTrim.Length);
+    return s.Trim();
+}
+
+string FormatCustomDataKb(IMyTerminalBlock block)
+{
+    int chars = block == null || block.CustomData == null ? 0 : block.CustomData.Length;
+    int kb = (chars + 1023) / 1024;
+    return kb + " KB";
 }
 
 void AppendCarrierValueRow(StringBuilder sb, string label, int index, double value, string unit, string fmt)
@@ -2003,11 +2168,145 @@ void RefreshCachedCarrierHydrogen()
 
 int CountAsteroidDatabases()
 {
-    int count = 0;
+    return GetAsteroidDbTimersSorted().Count;
+}
+
+int CountAsteroidDbRecords()
+{
+    return CollectAsteroidDbNumbers().Count;
+}
+
+int CountZoneDbAsteroidsAcrossZones()
+{
+    return CollectZoneDbNumbers().Count;
+}
+
+List<NumberedTimerEntry> GetAsteroidDbTimersSorted()
+{
+    return GetNumberedTimersSorted(asteroidDbTagPfx);
+}
+
+List<NumberedTimerEntry> GetZoneDatabaseTimersSorted()
+{
+    var result = new List<NumberedTimerEntry>();
     foreach (var t in GetTimerBlocksCached())
-        if (t.CustomName.IndexOf(asteroidDbTagPfx, StringComparison.OrdinalIgnoreCase) >= 0)
-            count++;
-    return count;
+    {
+        if (t == null || string.IsNullOrWhiteSpace(t.CustomName))
+            continue;
+        if (!t.CustomName.StartsWith(zoneDbTagPfx, StringComparison.OrdinalIgnoreCase))
+            continue;
+        string familyPrefix;
+        int index;
+        if (!TryGetNumberedTimerFamily(t.CustomName, out familyPrefix, out index))
+            continue;
+        var entry = new NumberedTimerEntry();
+        entry.Timer = t;
+        entry.Index = index;
+        result.Add(entry);
+    }
+    result.Sort((a, b) => string.Compare(a.Timer.CustomName, b.Timer.CustomName, StringComparison.OrdinalIgnoreCase));
+    return result;
+}
+
+List<NumberedTimerEntry> GetNumberedTimersSorted(string prefix)
+{
+    var result = new List<NumberedTimerEntry>();
+    foreach (var t in GetTimerBlocksCached())
+    {
+        if (t == null || string.IsNullOrWhiteSpace(t.CustomName))
+            continue;
+        int index;
+        if (!TryParseNumberedTimerIndex(t.CustomName, prefix, out index))
+            continue;
+        var entry = new NumberedTimerEntry();
+        entry.Timer = t;
+        entry.Index = index;
+        result.Add(entry);
+    }
+    result.Sort((a, b) => a.Index.CompareTo(b.Index));
+    return result;
+}
+
+bool TryParseNumberedTimerIndex(string timerName, string prefix, out int index)
+{
+    index = 0;
+    if (string.IsNullOrWhiteSpace(timerName) || string.IsNullOrWhiteSpace(prefix))
+        return false;
+    string name = timerName.Trim();
+    if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        return false;
+    string suffix = name.Substring(prefix.Length).Trim();
+    return int.TryParse(suffix, out index) && index > 0;
+}
+
+bool TryGetNumberedTimerFamily(string timerName, out string familyPrefix, out int index)
+{
+    familyPrefix = "";
+    index = 0;
+    if (string.IsNullOrWhiteSpace(timerName))
+        return false;
+
+    string name = timerName.TrimEnd();
+    int end = name.Length - 1;
+    while (end >= 0 && char.IsDigit(name[end]))
+        end--;
+    if (end == name.Length - 1)
+        return false;
+
+    string numberText = name.Substring(end + 1);
+    if (!int.TryParse(numberText, out index) || index <= 0)
+        return false;
+
+    familyPrefix = name.Substring(0, end + 1);
+    if (string.IsNullOrWhiteSpace(familyPrefix))
+        return false;
+    return true;
+}
+
+List<NumberedTimerEntry> GetZoneDbTimersSorted(ZoneDescriptor zone)
+{
+    var result = new List<NumberedTimerEntry>();
+    if (zone == null)
+        return result;
+
+    string familyPrefix;
+    int ignoredIndex;
+    if (!TryGetNumberedTimerFamily(zone.TimerName, out familyPrefix, out ignoredIndex))
+        return result;
+
+    foreach (var t in GetTimerBlocksCached())
+    {
+        if (t == null || string.IsNullOrWhiteSpace(t.CustomName))
+            continue;
+        int index;
+        if (!TryParseNumberedTimerIndex(t.CustomName, familyPrefix, out index))
+            continue;
+        var entry = new NumberedTimerEntry();
+        entry.Timer = t;
+        entry.Index = index;
+        result.Add(entry);
+    }
+    result.Sort((a, b) => a.Index.CompareTo(b.Index));
+    return result;
+}
+
+string BuildCombinedZoneDbText(List<NumberedTimerEntry> timers)
+{
+    var sb = new StringBuilder();
+    if (timers == null)
+        return "";
+
+    for (int i = 0; i < timers.Count; i++)
+    {
+        IMyTimerBlock timer = timers[i].Timer;
+        string text = timer == null ? "" : (timer.CustomData ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(text))
+            continue;
+        if (sb.Length > 0)
+            sb.AppendLine();
+        sb.AppendLine(text);
+    }
+    return sb.ToString().TrimEnd();
 }
 
 int CountMinedAsteroidsAcrossZones()
@@ -3477,8 +3776,7 @@ List<ZoneAsteroidRecord> ParseZoneDbRecords(string customData, string zoneName, 
                 continue;
 
             int nextNum;
-            if (IsAsteroidLabelLine(t, out nextNum) ||
-                t.IndexOf(asteroidDbTagPfx, StringComparison.OrdinalIgnoreCase) >= 0)
+            if (IsAsteroidLabelLine(t, out nextNum))
                 break;
 
             if (t.StartsWith("Ores:", StringComparison.OrdinalIgnoreCase))
@@ -3629,27 +3927,31 @@ bool TryGetActiveZone(out ZoneDescriptor zone, out IMyTimerBlock zoneDb, out str
         return false;
     }
 
-    zoneDb = FindTimerByExactName(best.TimerName);
-    if (zoneDb == null)
+    var zoneTimers = GetZoneDbTimersSorted(best);
+    if (zoneTimers.Count == 0)
     {
-        reason = $"active zone '{best.Name}' references missing timer '{best.TimerName}'.";
+        reason = $"active zone '{best.Name}' references missing numbered Zone DB family '{best.TimerName}'.";
         return false;
     }
 
     zone = best;
+    zoneDb = zoneTimers[0].Timer;
     return true;
 }
 
 List<ZoneAsteroidRecord> GetZoneDbRecordsCached(string zoneName, string zoneTimerName)
 {
-    IMyTimerBlock zoneDb = FindTimerByExactName(zoneTimerName);
-    if (zoneDb == null)
+    ZoneDescriptor cacheZone = new ZoneDescriptor();
+    cacheZone.Name = zoneName ?? "";
+    cacheZone.TimerName = zoneTimerName ?? "";
+    var zoneTimers = GetZoneDbTimersSorted(cacheZone);
+    if (zoneTimers.Count == 0)
     {
         InvalidateZoneDbCache(zoneTimerName);
         return new List<ZoneAsteroidRecord>();
     }
 
-    string text = zoneDb.CustomData ?? "";
+    string text = BuildCombinedZoneDbText(zoneTimers);
     string cachedText;
     List<ZoneAsteroidRecord> cachedRecords;
     if (_zoneDbCacheTextByTimer.TryGetValue(zoneTimerName, out cachedText) &&
@@ -3931,13 +4233,11 @@ void SaveAsteroid()
         return;
     }
 
-    // Determine next asteroid number and which DB timer it belongs to
+    // Determine next asteroid number. Storage is size-packed; asteroid number no longer implies a DB timer.
     int asteroidNum   = FindNextAsteroidNumber();
     string label      = asteroidNum.ToString("D3");
-    int dbIndex       = (asteroidNum - 1) / asteroidsPerDb + 1;
-    string dbTimerName = asteroidDbTagPfx + dbIndex.ToString("D2");
 
-    Echo($"SaveAsteroid: saving Asteroid {label} -> {dbTimerName}");
+    Echo($"SaveAsteroid: saving Asteroid {label}");
 
     // Carrier position and orientation from RC
     string carrierGps = FormatCarrierGps();
@@ -3977,52 +4277,19 @@ void SaveAsteroid()
     foreach (string line in pathLines)
         sb.AppendLine(line);
 
-    // Insert record into the Asteroid DB timer in ascending number order.
-    IMyTimerBlock dbTimer = FindTimerByExactName(dbTimerName);
-    if (dbTimer == null)
-    {
-        Echo($"SaveAsteroid: timer '{dbTimerName}' not found. Aborting.");
-        return;
-    }
-    string existingDb = dbTimer.CustomData ?? "";
+    string dbTimerName;
+    string storeError;
     string newRecord  = sb.ToString(); // starts with asteroidHeaderLine
-    bool inserted = false;
-    int searchFrom = 0;
-    while (true)
+    if (!StoreAsteroidRecordPacked(asteroidNum, newRecord, out dbTimerName, out storeError))
     {
-        int sepIdx = existingDb.IndexOf(asteroidHeaderLine, searchFrom, StringComparison.Ordinal);
-        if (sepIdx < 0) break;
-        // Skip newlines after the separator to reach the first content line
-        int pos = sepIdx + asteroidHeaderLine.Length;
-        while (pos < existingDb.Length && (existingDb[pos] == '\n' || existingDb[pos] == '\r'))
-            pos++;
-        int lineEnd = existingDb.IndexOfAny(new char[] { '\n', '\r' }, pos);
-        if (lineEnd < 0) lineEnd = existingDb.Length;
-        string firstLine = existingDb.Substring(pos, lineEnd - pos).Trim();
-        if (firstLine.StartsWith("Asteroid ", StringComparison.OrdinalIgnoreCase))
-        {
-            int existingNum;
-            if (int.TryParse(firstLine.Substring(9).Trim(), out existingNum) && existingNum > asteroidNum)
-            {
-                string before = existingDb.Substring(0, sepIdx);
-                if (before.Length > 0 && !before.EndsWith("\n")) before += "\n";
-                dbTimer.CustomData = before + newRecord + existingDb.Substring(sepIdx);
-                inserted = true;
-                break;
-            }
-        }
-        searchFrom = sepIdx + 1;
-    }
-    if (!inserted)
-    {
-        if (existingDb.Length > 0 && !existingDb.EndsWith("\n")) existingDb += "\n";
-        dbTimer.CustomData = existingDb + newRecord;
+        Echo("SaveAsteroid: " + storeError);
+        return;
     }
 
     // Update the Zone DB (GPS + ore summary + mined status)
     UpdateZoneDb(activeZone, asteroidNum, carrierGps, oreMap);
 
-    Echo($"SaveAsteroid: Asteroid {label} saved in zone '{activeZone.Name}'.");
+    Echo($"SaveAsteroid: Asteroid {label} saved in '{dbTimerName}' and zone '{activeZone.Name}'.");
     ClearMinerPathTimer("SaveAsteroid");
 }
 
@@ -4053,15 +4320,6 @@ void UpdateCurrentAsteroidFromMinerPath()
 
     int asteroidNum = mineAsteroidNum;
     string label = asteroidNum.ToString("D3");
-    int dbIndex = (asteroidNum - 1) / asteroidsPerDb + 1;
-    string dbTimerName = asteroidDbTagPfx + dbIndex.ToString("D2");
-    IMyTimerBlock dbTimer = FindTimerByExactName(dbTimerName);
-    if (dbTimer == null)
-    {
-        Echo($"UpdateAsteroid: timer '{dbTimerName}' not found.");
-        return;
-    }
-
     List<string> pathLines = ReadMinerPathLines();
     if (pathLines.Count == 0)
     {
@@ -4073,9 +4331,11 @@ void UpdateCurrentAsteroidFromMinerPath()
     EnsureOreNamesListed(oreMap);
     string carrierGps = FormatCarrierGps();
     string newRecord = BuildAsteroidDbRecord(label, carrierGps, oreMap, pathLines);
-    if (!ReplaceAsteroidRecordInDb(dbTimer, asteroidNum, newRecord))
+    string dbTimerName;
+    string storeError;
+    if (!StoreAsteroidRecordPacked(asteroidNum, newRecord, out dbTimerName, out storeError))
     {
-        Echo($"UpdateAsteroid: Asteroid {label} not found in '{dbTimerName}'.");
+        Echo("UpdateAsteroid: " + storeError);
         return;
     }
 
@@ -4083,7 +4343,7 @@ void UpdateCurrentAsteroidFromMinerPath()
     cachedAsteroidRuntimeNum = asteroidNum;
     cachedAsteroidRuntimeValid = false;
     minerPathRuntimeSaved = true;
-    Echo($"UpdateAsteroid: Asteroid {label} path and ores updated.");
+    Echo($"UpdateAsteroid: Asteroid {label} path and ores updated in '{dbTimerName}'.");
 }
 
 string BuildAsteroidDbRecord(string label, string carrierGps, Dictionary<string, double> oreMap, List<string> pathLines)
@@ -4115,32 +4375,165 @@ string BuildAsteroidDbRecord(string label, string carrierGps, Dictionary<string,
     return sb.ToString();
 }
 
-bool ReplaceAsteroidRecordInDb(IMyTimerBlock dbTimer, int asteroidNum, string newRecord)
+bool StoreAsteroidRecordPacked(int asteroidNum, string newRecord, out string dbTimerName, out string error)
 {
+    dbTimerName = "";
+    error = "";
+
+    string normalizedRecord = NormalizeDbText(newRecord);
+    if (normalizedRecord.Length > dbCustomDataSoftCapChars)
+    {
+        error = "Asteroid " + asteroidNum.ToString("D3") + " record is " + normalizedRecord.Length +
+                " chars, larger than the " + dbCustomDataSoftCapChars + " char DB cap.";
+        return false;
+    }
+
+    var timers = GetAsteroidDbTimersSorted();
+    if (timers.Count == 0)
+    {
+        error = "no numbered Asteroid DB timers found.";
+        return false;
+    }
+
+    IMyTimerBlock oldTimer;
+    string oldText;
+    int oldStart, oldEnd;
+    bool hasOld = TryFindAsteroidRecordRange(asteroidNum, out oldTimer, out oldText, out oldStart, out oldEnd);
+    string oldTextWithoutRecord = hasOld ? RemoveTextRange(oldText, oldStart, oldEnd) : "";
+    int oldTimerIndex = hasOld ? GetNumberedTimerIndexOrMax(oldTimer.CustomName, asteroidDbTagPfx) : 0;
+
+    if (hasOld)
+    {
+        string sameTimerText = InsertAsteroidRecordOrdered(oldTextWithoutRecord, asteroidNum, normalizedRecord);
+        if (sameTimerText.Length <= dbCustomDataSoftCapChars)
+        {
+            oldTimer.CustomData = sameTimerText;
+            dbTimerName = oldTimer.CustomName;
+            return true;
+        }
+    }
+
+    foreach (var entry in timers)
+    {
+        if (hasOld && entry.Index <= oldTimerIndex)
+            continue;
+
+        string candidateBase = entry.Timer == oldTimer ? oldTextWithoutRecord : (entry.Timer.CustomData ?? "");
+        string candidate = InsertAsteroidRecordOrdered(candidateBase, asteroidNum, normalizedRecord);
+        if (candidate.Length > dbCustomDataSoftCapChars)
+            continue;
+
+        if (hasOld && oldTimer != entry.Timer)
+            oldTimer.CustomData = NormalizeDbText(oldTextWithoutRecord);
+        entry.Timer.CustomData = candidate;
+        dbTimerName = entry.Timer.CustomName;
+        return true;
+    }
+
+    error = "no Asteroid DB timer has enough free CustomData space for Asteroid " + asteroidNum.ToString("D3") + ".";
+    return false;
+}
+
+int GetNumberedTimerIndexOrMax(string timerName, string prefix)
+{
+    int index;
+    return TryParseNumberedTimerIndex(timerName, prefix, out index) ? index : int.MaxValue;
+}
+
+bool TryFindAsteroidRecordRange(int asteroidNum, out IMyTimerBlock dbTimer, out string text, out int start, out int end)
+{
+    dbTimer = null;
+    text = "";
+    start = -1;
+    end = -1;
+
     string label = "Asteroid " + asteroidNum.ToString("D3");
-    string text = dbTimer.CustomData ?? "";
-    int labelIdx = text.IndexOf(label, StringComparison.OrdinalIgnoreCase);
-    if (labelIdx < 0)
-        return false;
+    foreach (var entry in GetAsteroidDbTimersSorted())
+    {
+        IMyTimerBlock timer = entry.Timer;
+        string candidateText = timer.CustomData ?? "";
+        int labelIdx = candidateText.IndexOf(label, StringComparison.OrdinalIgnoreCase);
+        if (labelIdx < 0)
+            continue;
 
-    int start = text.LastIndexOf(asteroidHeaderLine, labelIdx, StringComparison.Ordinal);
-    if (start < 0)
-        return false;
+        int recordStart = candidateText.LastIndexOf(asteroidHeaderLine, labelIdx, StringComparison.Ordinal);
+        if (recordStart < 0)
+            continue;
 
-    int next = text.IndexOf(asteroidHeaderLine, labelIdx + label.Length, StringComparison.Ordinal);
-    if (next >= 0)
-        next = text.IndexOf(asteroidHeaderLine, next + asteroidHeaderLine.Length, StringComparison.Ordinal);
-    if (next < 0)
-        next = text.Length;
+        int pathSeparator = candidateText.IndexOf(asteroidHeaderLine, labelIdx + label.Length, StringComparison.Ordinal);
+        int recordEnd = pathSeparator >= 0
+            ? candidateText.IndexOf(asteroidHeaderLine, pathSeparator + asteroidHeaderLine.Length, StringComparison.Ordinal)
+            : -1;
+        if (recordEnd < 0)
+            recordEnd = candidateText.Length;
+
+        dbTimer = timer;
+        text = candidateText;
+        start = recordStart;
+        end = recordEnd;
+        return true;
+    }
+    return false;
+}
+
+string RemoveTextRange(string text, int start, int end)
+{
+    if (string.IsNullOrEmpty(text))
+        return "";
+    start = Math.Max(0, Math.Min(start, text.Length));
+    end = Math.Max(start, Math.Min(end, text.Length));
 
     string before = text.Substring(0, start);
-    string after = text.Substring(next);
+    string after = text.Substring(end);
     if (before.Length > 0 && !before.EndsWith("\n"))
         before += "\n";
     if (after.Length > 0 && !after.StartsWith("\n"))
         after = "\n" + after;
-    dbTimer.CustomData = (before + newRecord + after).TrimEnd();
-    return true;
+    return NormalizeDbText(before + after);
+}
+
+string InsertAsteroidRecordOrdered(string existingText, int asteroidNum, string newRecord)
+{
+    string existing = NormalizeDbText(existingText);
+    string record = NormalizeDbText(newRecord);
+    if (string.IsNullOrWhiteSpace(existing))
+        return record;
+
+    int searchFrom = 0;
+    while (true)
+    {
+        int sepIdx = existing.IndexOf(asteroidHeaderLine, searchFrom, StringComparison.Ordinal);
+        if (sepIdx < 0)
+            break;
+
+        int pos = sepIdx + asteroidHeaderLine.Length;
+        while (pos < existing.Length && (existing[pos] == '\n' || existing[pos] == '\r'))
+            pos++;
+        int lineEnd = existing.IndexOfAny(new char[] { '\n', '\r' }, pos);
+        if (lineEnd < 0)
+            lineEnd = existing.Length;
+
+        string firstLine = existing.Substring(pos, lineEnd - pos).Trim();
+        if (firstLine.StartsWith("Asteroid ", StringComparison.OrdinalIgnoreCase))
+        {
+            int existingNum;
+            if (int.TryParse(firstLine.Substring(9).Trim(), out existingNum) && existingNum > asteroidNum)
+            {
+                string before = existing.Substring(0, sepIdx);
+                if (before.Length > 0 && !before.EndsWith("\n"))
+                    before += "\n";
+                return NormalizeDbText(before + record + "\n" + existing.Substring(sepIdx));
+            }
+        }
+        searchFrom = sepIdx + 1;
+    }
+
+    return NormalizeDbText(existing + "\n" + record);
+}
+
+string NormalizeDbText(string text)
+{
+    return (text ?? "").Replace("\r", "").TrimEnd();
 }
 
 void EnsureOreNamesListed(Dictionary<string, double> oreMap)
@@ -4277,10 +4670,10 @@ void SimulateRecompile()
 HashSet<int> CollectAsteroidDbNumbers()
 {
     var nums = new HashSet<int>();
-    foreach (var t in GetTimerBlocksCached())
+    foreach (var entry in GetAsteroidDbTimersSorted())
     {
+        IMyTimerBlock t = entry.Timer;
         if (t == null || string.IsNullOrWhiteSpace(t.CustomName)) continue;
-        if (t.CustomName.IndexOf(asteroidDbTagPfx, StringComparison.OrdinalIgnoreCase) < 0) continue;
         foreach (string line in (t.CustomData ?? "").Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
         {
             string trimmed = line.Trim();
@@ -4364,38 +4757,52 @@ void RunDbCheck(bool fix)
     int removed = 0;
     foreach (var zone in GetZoneRegistryCached())
     {
-        IMyTimerBlock zoneDb = FindTimerByExactName(zone.TimerName);
-        if (zoneDb == null)
+        var timers = GetZoneDbTimersSorted(zone);
+        if (timers.Count == 0)
         {
-            Echo($"dbcheck;fix: Zone DB timer '{zone.TimerName}' not found for zone '{zone.Name}'.");
+            Echo($"dbcheck;fix: Zone DB family '{zone.TimerName}' not found for zone '{zone.Name}'.");
             continue;
         }
 
-        var kept = new List<ZoneAsteroidRecord>();
-        foreach (var rec in GetZoneDbRecordsCached(zone.Name, zone.TimerName))
-            if (!orphanSet.Contains(rec.Number))
-                kept.Add(rec);
-
-        if (kept.Count == GetZoneDbRecordsCached(zone.Name, zone.TimerName).Count)
-            continue;
-
-        var sb = new StringBuilder();
-        for (int i = 0; i < kept.Count; i++)
-        {
-            var rec = kept[i];
-            if (sb.Length > 0)
-                sb.AppendLine();
-            sb.AppendLine(rec.Number.ToString("D3"));
-            sb.AppendLine(rec.GpsLine);
-            sb.AppendLine("Ores: " + (rec.Ores.Count > 0 ? string.Join(",", rec.Ores) : "(none)"));
-            sb.AppendLine("Status: " + (string.IsNullOrWhiteSpace(rec.Status) ? "Open" : rec.Status));
-        }
-
-        removed += GetZoneDbRecordsCached(zone.Name, zone.TimerName).Count - kept.Count;
-        zoneDb.CustomData = sb.ToString().TrimEnd();
-        InvalidateZoneDbCache(zone.TimerName);
+        foreach (var entry in timers)
+            removed += RemoveZoneEntriesFromTimer(entry.Timer, orphanSet);
+        if (removed > 0)
+            InvalidateZoneDbCache(zone.TimerName);
     }
     Echo($"dbcheck;fix: removed {removed} orphaned Zone entr{(removed == 1 ? "y" : "ies")}.");
+}
+
+int RemoveZoneEntriesFromTimer(IMyTimerBlock zoneDb, HashSet<int> orphanSet)
+{
+    if (zoneDb == null || orphanSet == null || orphanSet.Count == 0)
+        return 0;
+
+    var lines = new List<string>((zoneDb.CustomData ?? "").Replace("\r", "").Split('\n'));
+    int removed = 0;
+    for (int i = 0; i < lines.Count; i++)
+    {
+        int asteroidNum;
+        if (!IsAsteroidLabelLine((lines[i] ?? "").Trim(), out asteroidNum) || !orphanSet.Contains(asteroidNum))
+            continue;
+
+        int end = lines.Count;
+        for (int j = i + 1; j < lines.Count; j++)
+        {
+            int nextNum;
+            if (IsAsteroidLabelLine((lines[j] ?? "").Trim(), out nextNum))
+            {
+                end = j;
+                break;
+            }
+        }
+
+        lines.RemoveRange(i, end - i);
+        removed++;
+        i--;
+    }
+
+    zoneDb.CustomData = NormalizeDbText(string.Join("\n", lines));
+    return removed;
 }
 
 string DumpDuplicateZoneIdCheckToCustomData()
@@ -4628,19 +5035,19 @@ bool LoadAsteroid(string argument)
         return false;
     }
 
-    int dbIndex = (asteroidNum - 1) / asteroidsPerDb + 1;
-    string dbTimerName = asteroidDbTagPfx + dbIndex.ToString("D2");
-    IMyTimerBlock dbTimer = FindTimerByExactName(dbTimerName);
-    if (dbTimer == null)
+    IMyTimerBlock dbTimer;
+    string dbText;
+    int recordStart, recordEnd;
+    if (!TryFindAsteroidRecordRange(asteroidNum, out dbTimer, out dbText, out recordStart, out recordEnd))
     {
-        Echo($"LoadAsteroid: DB timer '{dbTimerName}' not found.");
+        Echo($"LoadAsteroid: Asteroid {label} not found in numbered Asteroid DB timers.");
         return false;
     }
 
-    List<string> pathLines = ExtractAsteroidPathLines(dbTimer.CustomData ?? "", asteroidNum);
+    List<string> pathLines = ExtractAsteroidPathLines(dbText.Substring(recordStart, recordEnd - recordStart), asteroidNum);
     if (pathLines.Count == 0)
     {
-        Echo($"LoadAsteroid: no path data found for Asteroid {label} in '{dbTimerName}'.");
+        Echo($"LoadAsteroid: no path data found for Asteroid {label} in '{dbTimer.CustomName}'.");
         return false;
     }
 
@@ -5161,14 +5568,13 @@ bool TryGetAsteroidDbMetadataRange(int asteroidNum, out IMyTimerBlock dbTimer, o
     labelIdx = -1;
     metadataEndIdx = -1;
 
-    int dbIndex = (asteroidNum - 1) / asteroidsPerDb + 1;
-    string dbTimerName = asteroidDbTagPfx + dbIndex.ToString("D2");
-    dbTimer = FindTimerByExactName(dbTimerName);
-    if (dbTimer == null)
+    string dbText;
+    int recordStart, recordEnd;
+    if (!TryFindAsteroidRecordRange(asteroidNum, out dbTimer, out dbText, out recordStart, out recordEnd))
         return false;
 
     string label = "Asteroid " + asteroidNum.ToString("D3");
-    lines = new List<string>((dbTimer.CustomData ?? "").Replace("\r", "").Split('\n'));
+    lines = new List<string>((dbText ?? "").Replace("\r", "").Split('\n'));
     for (int i = 0; i < lines.Count; i++)
     {
         if (!string.Equals((lines[i] ?? "").Trim(), label, StringComparison.OrdinalIgnoreCase))
@@ -5202,27 +5608,13 @@ void UpdateZoneDb(ZoneDescriptor zone, int asteroidNum, string carrierGps, Dicti
         return;
     }
 
-    IMyTimerBlock zoneDb = FindTimerByExactName(zone.TimerName);
-    if (zoneDb == null)
+    string timerName;
+    string error;
+    if (!StoreZoneDbEntryPacked(zone, asteroidNum, BuildZoneDbEntry(asteroidNum, carrierGps, oreMap), out timerName, out error))
     {
-        Echo($"SaveAsteroid: Zone DB timer '{zone.TimerName}' not found. Skipping.");
+        Echo("SaveAsteroid: Zone DB update skipped: " + error);
         return;
     }
-
-    string existing = zoneDb.CustomData ?? "";
-    var sb = new StringBuilder();
-    if (!string.IsNullOrWhiteSpace(existing))
-    {
-        sb.Append(existing.TrimEnd());
-        sb.AppendLine();
-    }
-
-    sb.AppendLine(asteroidNum.ToString("D3"));
-    sb.AppendLine(carrierGps);
-    sb.AppendLine("Ores: " + BuildOreSummary(oreMap));
-    sb.AppendLine("Status: " + BuildAsteroidStatus(oreMap));
-
-    zoneDb.CustomData = sb.ToString();
     InvalidateZoneDbCache(zone.TimerName);
 }
 
@@ -5234,54 +5626,175 @@ void ReplaceZoneDbEntry(ZoneDescriptor zone, int asteroidNum, string carrierGps,
         return;
     }
 
-    IMyTimerBlock zoneDb = FindTimerByExactName(zone.TimerName);
-    if (zoneDb == null)
+    string timerName;
+    string error;
+    if (!StoreZoneDbEntryPacked(zone, asteroidNum, BuildZoneDbEntry(asteroidNum, carrierGps, oreMap), out timerName, out error))
     {
-        Echo($"UpdateAsteroid: Zone DB timer '{zone.TimerName}' not found. Skipping.");
+        Echo("UpdateAsteroid: Zone DB update skipped: " + error);
         return;
     }
+    InvalidateZoneDbCache(zone.TimerName);
+}
 
-    var lines = new List<string>((zoneDb.CustomData ?? "").Replace("\r", "").Split('\n'));
-    string label = asteroidNum.ToString("D3");
-    int start = -1;
-    int end = lines.Count;
-    for (int i = 0; i < lines.Count; i++)
+string BuildZoneDbEntry(int asteroidNum, string carrierGps, Dictionary<string, double> oreMap)
+{
+    var sb = new StringBuilder();
+    sb.AppendLine(asteroidNum.ToString("D3"));
+    sb.AppendLine(carrierGps);
+    sb.AppendLine("Ores: " + BuildOreSummary(oreMap));
+    sb.AppendLine("Status: " + BuildAsteroidStatus(oreMap));
+    return sb.ToString();
+}
+
+bool StoreZoneDbEntryPacked(ZoneDescriptor zone, int asteroidNum, string newEntry, out string timerName, out string error)
+{
+    timerName = "";
+    error = "";
+
+    string normalizedEntry = NormalizeDbText(newEntry);
+    if (normalizedEntry.Length > dbCustomDataSoftCapChars)
     {
-        if (!string.Equals((lines[i] ?? "").Trim(), label, StringComparison.OrdinalIgnoreCase))
-            continue;
-        start = i;
-        for (int j = i + 1; j < lines.Count; j++)
-        {
-            int nextNum;
-            if (IsAsteroidLabelLine((lines[j] ?? "").Trim(), out nextNum))
-            {
-                end = j;
-                break;
-            }
-        }
-        break;
+        error = "Zone DB entry for Asteroid " + asteroidNum.ToString("D3") + " is larger than the DB cap.";
+        return false;
     }
 
-    var replacement = new List<string>();
-    replacement.Add(label);
-    replacement.Add(carrierGps);
-    replacement.Add("Ores: " + BuildOreSummary(oreMap));
-    replacement.Add("Status: " + BuildAsteroidStatus(oreMap));
-
-    if (start >= 0)
+    var timers = GetZoneDbTimersSorted(zone);
+    if (timers.Count == 0)
     {
-        lines.RemoveRange(start, end - start);
-        lines.InsertRange(start, replacement);
+        error = "no numbered Zone DB timers found for '" + (zone == null ? "" : zone.TimerName) + "'.";
+        return false;
+    }
+
+    IMyTimerBlock oldTimer;
+    string oldText;
+    int oldStartLine, oldEndLine;
+    bool hasOld = TryFindZoneDbEntryRange(zone, asteroidNum, out oldTimer, out oldText, out oldStartLine, out oldEndLine);
+    string oldTextWithoutEntry = hasOld ? RemoveZoneDbEntryByLineRange(oldText, oldStartLine, oldEndLine) : "";
+    int oldTimerIndex = hasOld ? GetZoneTimerIndexOrMax(oldTimer.CustomName) : 0;
+
+    if (hasOld)
+    {
+        string sameTimerText = InsertZoneDbEntryOrdered(oldTextWithoutEntry, asteroidNum, normalizedEntry);
+        if (sameTimerText.Length <= dbCustomDataSoftCapChars)
+        {
+            oldTimer.CustomData = sameTimerText;
+            timerName = oldTimer.CustomName;
+            return true;
+        }
+    }
+
+    foreach (var entry in timers)
+    {
+        if (hasOld && entry.Index <= oldTimerIndex)
+            continue;
+
+        string candidateBase = entry.Timer == oldTimer ? oldTextWithoutEntry : (entry.Timer.CustomData ?? "");
+        string candidate = InsertZoneDbEntryOrdered(candidateBase, asteroidNum, normalizedEntry);
+        if (candidate.Length > dbCustomDataSoftCapChars)
+            continue;
+
+        if (hasOld && oldTimer != entry.Timer)
+            oldTimer.CustomData = NormalizeDbText(oldTextWithoutEntry);
+        entry.Timer.CustomData = candidate;
+        timerName = entry.Timer.CustomName;
+        return true;
+    }
+
+    error = "no Zone DB timer has enough free CustomData space for Asteroid " + asteroidNum.ToString("D3") + ".";
+    return false;
+}
+
+int GetZoneTimerIndexOrMax(string timerName)
+{
+    string familyPrefix;
+    int index;
+    return TryGetNumberedTimerFamily(timerName, out familyPrefix, out index) ? index : int.MaxValue;
+}
+
+bool TryFindZoneDbEntryRange(ZoneDescriptor zone, int asteroidNum, out IMyTimerBlock timer, out string text, out int startLine, out int endLine)
+{
+    timer = null;
+    text = "";
+    startLine = -1;
+    endLine = -1;
+
+    string label = asteroidNum.ToString("D3");
+    foreach (var entry in GetZoneDbTimersSorted(zone))
+    {
+        IMyTimerBlock candidateTimer = entry.Timer;
+        string candidateText = (candidateTimer.CustomData ?? "").Replace("\r", "");
+        var lines = new List<string>(candidateText.Split('\n'));
+        for (int i = 0; i < lines.Count; i++)
+        {
+            if (!string.Equals((lines[i] ?? "").Trim(), label, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            int end = lines.Count;
+            for (int j = i + 1; j < lines.Count; j++)
+            {
+                int nextNum;
+                if (IsAsteroidLabelLine((lines[j] ?? "").Trim(), out nextNum))
+                {
+                    end = j;
+                    break;
+                }
+            }
+
+            timer = candidateTimer;
+            text = candidateText;
+            startLine = i;
+            endLine = end;
+            return true;
+        }
+    }
+    return false;
+}
+
+string RemoveZoneDbEntryByLineRange(string text, int startLine, int endLine)
+{
+    var lines = new List<string>((text ?? "").Replace("\r", "").Split('\n'));
+    startLine = Math.Max(0, Math.Min(startLine, lines.Count));
+    endLine = Math.Max(startLine, Math.Min(endLine, lines.Count));
+    if (endLine > startLine)
+        lines.RemoveRange(startLine, endLine - startLine);
+    return NormalizeDbText(string.Join("\n", lines));
+}
+
+string InsertZoneDbEntryOrdered(string existingText, int asteroidNum, string entryText)
+{
+    string entry = NormalizeDbText(entryText);
+    string existing = NormalizeDbText(existingText);
+    if (string.IsNullOrWhiteSpace(existing))
+        return entry;
+
+    var lines = new List<string>(existing.Split('\n'));
+    int insertAt = lines.Count;
+    for (int i = 0; i < lines.Count; i++)
+    {
+        int existingNum;
+        if (!IsAsteroidLabelLine((lines[i] ?? "").Trim(), out existingNum))
+            continue;
+        if (existingNum > asteroidNum)
+        {
+            insertAt = i;
+            break;
+        }
+    }
+
+    var entryLines = new List<string>(entry.Split('\n'));
+    if (insertAt < lines.Count)
+    {
+        if (insertAt > 0 && !string.IsNullOrWhiteSpace(lines[insertAt - 1]))
+            entryLines.Add("");
+        lines.InsertRange(insertAt, entryLines);
     }
     else
     {
         if (lines.Count > 0 && !string.IsNullOrWhiteSpace(lines[lines.Count - 1]))
             lines.Add("");
-        lines.AddRange(replacement);
+        lines.AddRange(entryLines);
     }
-
-    zoneDb.CustomData = string.Join("\n", lines).TrimEnd();
-    InvalidateZoneDbCache(zone.TimerName);
+    return NormalizeDbText(string.Join("\n", lines));
 }
 
 
@@ -5313,11 +5826,29 @@ void SetAllAsteroidsOpen()
         return;
     }
 
-    var lines = new List<string>((zoneDb.CustomData ?? "").Split('\n'));
     int updated = 0;
     int added = 0;
+    foreach (var entry in GetZoneDbTimersSorted(zone))
+    {
+        int timerUpdated;
+        int timerAdded;
+        SetAllAsteroidsOpenInZoneTimer(entry.Timer, out timerUpdated, out timerAdded);
+        updated += timerUpdated;
+        added += timerAdded;
+    }
+    InvalidateZoneDbCache(zone.TimerName);
+    Echo($"SetAllOpen: zone '{zone.Name}' status set to Open (updated {updated}, added {added}).");
+}
 
-    // First, normalize any existing status lines.
+void SetAllAsteroidsOpenInZoneTimer(IMyTimerBlock zoneDb, out int updated, out int added)
+{
+    updated = 0;
+    added = 0;
+    if (zoneDb == null)
+        return;
+
+    var lines = new List<string>((zoneDb.CustomData ?? "").Split('\n'));
+
     for (int i = 0; i < lines.Count; i++)
     {
         string t = lines[i].Trim();
@@ -5328,7 +5859,6 @@ void SetAllAsteroidsOpen()
         }
     }
 
-    // Then ensure every asteroid entry has a status line.
     for (int i = 0; i < lines.Count; i++)
     {
         int asteroidNum;
@@ -5346,8 +5876,7 @@ void SetAllAsteroidsOpen()
                 continue;
 
             int nextNum;
-            if (IsAsteroidLabelLine(t, out nextNum) ||
-                t.IndexOf(asteroidDbTagPfx, StringComparison.OrdinalIgnoreCase) >= 0)
+            if (IsAsteroidLabelLine(t, out nextNum))
                 break;
 
             Vector3D _ap, _af, _au;
@@ -5372,8 +5901,6 @@ void SetAllAsteroidsOpen()
     }
 
     zoneDb.CustomData = string.Join("\n", lines).TrimEnd();
-    InvalidateZoneDbCache(zone.TimerName);
-    Echo($"SetAllOpen: zone '{zone.Name}' status set to Open (updated {updated}, added {added}).");
 }
 
 bool IsAsteroidLabelLine(string line, out int asteroidNum)
@@ -5405,15 +5932,12 @@ bool TrySetAsteroidStatus(int asteroidNum, string newStatus)
     IMyTimerBlock zoneDb;
     string reason;
     if (TryGetActiveZone(out zone, out zoneDb, out reason) &&
-        TrySetAsteroidStatusInZoneDb(zone, zoneDb, asteroidNum, newStatus))
+        TrySetAsteroidStatusInZoneDbFamily(zone, asteroidNum, newStatus))
         return true;
 
     foreach (ZoneDescriptor candidateZone in GetZoneRegistryCached())
     {
-        IMyTimerBlock candidateDb = FindTimerByExactName(candidateZone.TimerName);
-        if (candidateDb == null)
-            continue;
-        if (TrySetAsteroidStatusInZoneDb(candidateZone, candidateDb, asteroidNum, newStatus))
+        if (TrySetAsteroidStatusInZoneDbFamily(candidateZone, asteroidNum, newStatus))
             return true;
     }
 
@@ -5424,18 +5948,22 @@ bool TrySetMineAsteroidStatus(int asteroidNum, string newStatus)
 {
     if (!string.IsNullOrWhiteSpace(mineZoneTimerName))
     {
-        IMyTimerBlock zoneDb = FindTimerByExactName(mineZoneTimerName);
-        if (zoneDb != null)
-        {
-            ZoneDescriptor zone = new ZoneDescriptor();
-            zone.Name = mineZoneName;
-            zone.TimerName = mineZoneTimerName;
-            if (TrySetAsteroidStatusInZoneDb(zone, zoneDb, asteroidNum, newStatus))
-                return true;
-        }
+        ZoneDescriptor zone = new ZoneDescriptor();
+        zone.Name = mineZoneName;
+        zone.TimerName = mineZoneTimerName;
+        if (TrySetAsteroidStatusInZoneDbFamily(zone, asteroidNum, newStatus))
+            return true;
     }
 
     return TrySetAsteroidStatus(asteroidNum, newStatus);
+}
+
+bool TrySetAsteroidStatusInZoneDbFamily(ZoneDescriptor zone, int asteroidNum, string newStatus)
+{
+    foreach (var entry in GetZoneDbTimersSorted(zone))
+        if (TrySetAsteroidStatusInZoneDb(zone, entry.Timer, asteroidNum, newStatus))
+            return true;
+    return false;
 }
 
 bool TrySetAsteroidStatusInZoneDb(ZoneDescriptor zone, IMyTimerBlock zoneDb, int asteroidNum, string newStatus)
@@ -5462,8 +5990,7 @@ bool TrySetAsteroidStatusInZoneDb(ZoneDescriptor zone, IMyTimerBlock zoneDb, int
                 continue;
 
             int nextNum;
-            if (IsAsteroidLabelLine(t, out nextNum) ||
-                t.IndexOf(asteroidDbTagPfx, StringComparison.OrdinalIgnoreCase) >= 0)
+            if (IsAsteroidLabelLine(t, out nextNum))
                 break;
 
             insertAt = j + 1;
