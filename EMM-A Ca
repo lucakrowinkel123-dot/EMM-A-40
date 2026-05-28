@@ -215,6 +215,19 @@ bool caAuditPending = false;
 bool caAuditRunning = false;
 int caAuditDelayTicks = 0;
 string caAuditMessage = "";
+const int caAuditRecordsPerTick = 5;
+int caAuditPhase = 0; // 0 none, 1 asteroid DBs, 2 zone DBs, 3 finish
+List<NumberedTimerEntry> caAuditAsteroidTimers = new List<NumberedTimerEntry>();
+List<NumberedTimerEntry> caAuditZoneTimers = new List<NumberedTimerEntry>();
+HashSet<int> caAuditAsteroidNums = new HashSet<int>();
+HashSet<int> caAuditZoneNums = new HashSet<int>();
+Dictionary<int, List<ZoneDbNumberEntry>> caAuditZoneEntriesByNumber = new Dictionary<int, List<ZoneDbNumberEntry>>();
+HashSet<string> caAuditZoneTimerNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+Dictionary<string, string> caAuditZoneNameByTimer = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+int caAuditTimerIndex = 0;
+int caAuditLineIndex = 0;
+string[] caAuditCurrentLines = null;
+int caAuditRecordsScanned = 0;
 Dictionary<string, double> carrierOreCache = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 Dictionary<string, double> carrierOreScanTotals = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 List<IMyTerminalBlock> carrierOreScanBlocks = new List<IMyTerminalBlock>();
@@ -1016,10 +1029,41 @@ void StartCarrierAuditMenu()
 {
     caLcdMenu = CaLcdMenu.Audit;
     caMenuIndex = 0;
+    StartCarrierAudit();
+}
+
+void StartCarrierAudit()
+{
     caAuditPending = true;
     caAuditRunning = true;
-    caAuditDelayTicks = 30;
-    caAuditMessage = "";
+    caAuditDelayTicks = 0;
+    caAuditMessage = "Audit starting.";
+    caAuditPhase = 1;
+    caAuditAsteroidTimers = GetAsteroidDbTimersSorted();
+    caAuditZoneTimers.Clear();
+    caAuditZoneTimerNames.Clear();
+    caAuditZoneNameByTimer.Clear();
+    foreach (var zone in GetZoneRegistryCached())
+    {
+        foreach (var entry in GetZoneDbTimersSorted(zone))
+        {
+            if (entry == null || entry.Timer == null)
+                continue;
+            if (caAuditZoneTimerNames.Contains(entry.Timer.CustomName))
+                continue;
+            caAuditZoneTimerNames.Add(entry.Timer.CustomName);
+            caAuditZoneNameByTimer[entry.Timer.CustomName] = zone.Name;
+            caAuditZoneTimers.Add(entry);
+        }
+    }
+    caAuditZoneTimers.Sort((a, b) => string.Compare(a.Timer.CustomName, b.Timer.CustomName, StringComparison.OrdinalIgnoreCase));
+    caAuditAsteroidNums.Clear();
+    caAuditZoneNums.Clear();
+    caAuditZoneEntriesByNumber.Clear();
+    caAuditTimerIndex = 0;
+    caAuditLineIndex = 0;
+    caAuditCurrentLines = null;
+    caAuditRecordsScanned = 0;
 }
 
 void UpdateCarrierAuditTask()
@@ -1031,9 +1075,138 @@ void UpdateCarrierAuditTask()
         caAuditDelayTicks--;
         return;
     }
+
+    int remaining = caAuditRecordsPerTick;
+    while (remaining > 0 && caAuditPending)
+    {
+        if (caAuditPhase == 1)
+            remaining -= AuditAsteroidDbRecords(remaining);
+        else if (caAuditPhase == 2)
+            remaining -= AuditZoneDbRecords(remaining);
+        else
+            FinishCarrierAudit();
+    }
+    if (caAuditRunning)
+        caAuditMessage = "Audit " + caAuditRecordsScanned + " records " + GetLoadingSymbol();
+}
+
+int AuditAsteroidDbRecords(int maxRecords)
+{
+    int processed = 0;
+    while (processed < maxRecords)
+    {
+        if (caAuditTimerIndex >= caAuditAsteroidTimers.Count)
+        {
+            caAuditPhase = 2;
+            caAuditTimerIndex = 0;
+            caAuditLineIndex = 0;
+            caAuditCurrentLines = null;
+            break;
+        }
+
+        IMyTimerBlock timer = caAuditAsteroidTimers[caAuditTimerIndex].Timer;
+        if (caAuditCurrentLines == null)
+            caAuditCurrentLines = ((timer == null ? "" : timer.CustomData) ?? "").Replace("\r", "").Split('\n');
+
+        if (caAuditLineIndex >= caAuditCurrentLines.Length)
+        {
+            caAuditTimerIndex++;
+            caAuditLineIndex = 0;
+            caAuditCurrentLines = null;
+            continue;
+        }
+
+        string line = (caAuditCurrentLines[caAuditLineIndex++] ?? "").Trim();
+        if (!line.StartsWith("Asteroid ", StringComparison.OrdinalIgnoreCase))
+            continue;
+
+        int num;
+        if (int.TryParse(line.Substring(9).Trim(), out num) && num > 0)
+            caAuditAsteroidNums.Add(num);
+        processed++;
+        caAuditRecordsScanned++;
+    }
+    return processed;
+}
+
+int AuditZoneDbRecords(int maxRecords)
+{
+    int processed = 0;
+    while (processed < maxRecords)
+    {
+        if (caAuditTimerIndex >= caAuditZoneTimers.Count)
+        {
+            caAuditPhase = 3;
+            caAuditCurrentLines = null;
+            break;
+        }
+
+        IMyTimerBlock timer = caAuditZoneTimers[caAuditTimerIndex].Timer;
+        if (caAuditCurrentLines == null)
+            caAuditCurrentLines = ((timer == null ? "" : timer.CustomData) ?? "").Replace("\r", "").Split('\n');
+
+        if (caAuditLineIndex >= caAuditCurrentLines.Length)
+        {
+            caAuditTimerIndex++;
+            caAuditLineIndex = 0;
+            caAuditCurrentLines = null;
+            continue;
+        }
+
+        int num;
+        if (IsZoneDbAsteroidHeaderAt(caAuditCurrentLines, caAuditLineIndex, out num))
+        {
+            caAuditZoneNums.Add(num);
+            AddAuditZoneEntry(num, timer == null ? "" : timer.CustomName);
+            processed++;
+            caAuditRecordsScanned++;
+        }
+        caAuditLineIndex++;
+    }
+    return processed;
+}
+
+void AddAuditZoneEntry(int asteroidNum, string timerName)
+{
+    List<ZoneDbNumberEntry> entries;
+    if (!caAuditZoneEntriesByNumber.TryGetValue(asteroidNum, out entries))
+    {
+        entries = new List<ZoneDbNumberEntry>();
+        caAuditZoneEntriesByNumber.Add(asteroidNum, entries);
+    }
+
+    string zoneName;
+    if (!caAuditZoneNameByTimer.TryGetValue(timerName ?? "", out zoneName) || string.IsNullOrWhiteSpace(zoneName))
+        zoneName = string.IsNullOrWhiteSpace(timerName) ? "Unknown Zone" : timerName;
+
+    var entry = new ZoneDbNumberEntry();
+    entry.Number = asteroidNum;
+    entry.ZoneName = zoneName;
+    entries.Add(entry);
+}
+
+void FinishCarrierAudit()
+{
+    var orphanedZone = new List<int>();
+    var orphanedAsteroid = new List<int>();
+    var duplicateZone = new List<int>();
+    foreach (int n in caAuditZoneNums)
+        if (!caAuditAsteroidNums.Contains(n))
+            orphanedZone.Add(n);
+    foreach (int n in caAuditAsteroidNums)
+        if (!caAuditZoneNums.Contains(n))
+            orphanedAsteroid.Add(n);
+    foreach (var kv in caAuditZoneEntriesByNumber)
+        if (kv.Value.Count > 1)
+            duplicateZone.Add(kv.Key);
+    orphanedZone.Sort();
+    orphanedAsteroid.Sort();
+    duplicateZone.Sort();
+
+    caAuditMessage = BuildDbAuditReport(orphanedZone, orphanedAsteroid, duplicateZone);
     caAuditPending = false;
-    caAuditMessage = DumpDuplicateZoneIdCheckToCustomData();
     caAuditRunning = false;
+    caAuditPhase = 0;
 }
 
 void UpdateCarrierLcd()
@@ -2983,7 +3156,8 @@ void RemoteCommand(string command)
             RunDbCheck(true);
             break;
         case "audit":
-            DumpDuplicateZoneIdCheckToCustomData();
+            StartCarrierAudit();
+            Echo("Audit started.");
             break;
         case "fullauto":
             SetFullAutoEnabledFromUi(true);
@@ -4900,6 +5074,70 @@ int RemoveZoneEntriesFromTimer(IMyTimerBlock zoneDb, HashSet<int> orphanSet)
 
     zoneDb.CustomData = NormalizeDbText(string.Join("\n", lines));
     return removed;
+}
+
+string BuildDbAuditReport(List<int> orphanedZone, List<int> orphanedAsteroid, List<int> duplicateZone)
+{
+    int zoneOnly = orphanedZone == null ? 0 : orphanedZone.Count;
+    int asteroidOnly = orphanedAsteroid == null ? 0 : orphanedAsteroid.Count;
+    int duplicates = duplicateZone == null ? 0 : duplicateZone.Count;
+    int healthy = 0;
+    foreach (int n in caAuditZoneNums)
+        if (caAuditAsteroidNums.Contains(n))
+            healthy++;
+
+    var report = new StringBuilder();
+    report.AppendLine("[DatabaseAudit]");
+    report.AppendLine("Healthy: " + healthy);
+    report.AppendLine("Zone records: " + caAuditZoneNums.Count);
+    report.AppendLine("Asteroid records: " + caAuditAsteroidNums.Count);
+    report.AppendLine("Zone-only: " + zoneOnly);
+    if (zoneOnly > 0)
+        report.AppendLine("Zone-only IDs: " + FormatAsteroidNumberList(orphanedZone));
+    report.AppendLine("Asteroid-only: " + asteroidOnly);
+    if (asteroidOnly > 0)
+        report.AppendLine("Asteroid-only IDs: " + FormatAsteroidNumberList(orphanedAsteroid));
+    report.AppendLine("Duplicate Zone IDs: " + duplicates);
+    if (duplicates > 0)
+    {
+        for (int i = 0; i < duplicateZone.Count; i++)
+        {
+            int num = duplicateZone[i];
+            var zoneNames = new List<string>();
+            List<ZoneDbNumberEntry> entries;
+            if (caAuditZoneEntriesByNumber.TryGetValue(num, out entries))
+            {
+                foreach (var entry in entries)
+                    if (!zoneNames.Contains(entry.ZoneName))
+                        zoneNames.Add(entry.ZoneName);
+            }
+            report.AppendLine(num.ToString("D3") + ": " + string.Join(", ", zoneNames));
+        }
+    }
+
+    var sb = new StringBuilder();
+    string existing = Me.CustomData ?? "";
+    if (!string.IsNullOrWhiteSpace(existing))
+        sb.Append(existing.TrimEnd());
+    sb.AppendLine();
+    sb.AppendLine();
+    sb.Append(report.ToString().TrimEnd());
+    Me.CustomData = sb.ToString();
+
+    Echo("Database audit dumped to Custom Data.");
+    if (zoneOnly == 0 && asteroidOnly == 0 && duplicates == 0)
+        return "Audit OK: " + healthy + " linked.";
+    return "Audit: " + zoneOnly + " Zone-only, " + asteroidOnly + " Asteroid-only, " + duplicates + " duplicate.";
+}
+
+string FormatAsteroidNumberList(List<int> nums)
+{
+    if (nums == null || nums.Count == 0)
+        return "(none)";
+    var parts = new List<string>();
+    for (int i = 0; i < nums.Count; i++)
+        parts.Add(nums[i].ToString("D3"));
+    return string.Join(", ", parts);
 }
 
 string DumpDuplicateZoneIdCheckToCustomData()
