@@ -84,6 +84,10 @@ string minerProgressTag = "EMM_A_MINER_PROGRESS";
 string carrierStatusTag = "EMM_A_CARRIER_STATUS";
 string minerCommandTag = "EMM_A_MINER_COMMAND";
 string minerLcdName = "EMM-A Mi LCD";
+string analogThrottleSourceFilter = "hotas warthog";
+string analogThrottleUpButton = "7";
+string analogThrottleApplyButton = "8";
+string analogThrottleDownButton = "9";
 string indicatorLightName = "EMM-A Mi Indicator light";
 string pathRecordSoundBlockName = "EMM-A Mi Sound Block";
 string pathRecordSoundName = "Alert 2";
@@ -761,6 +765,66 @@ bool TryHandleMinerLcdCommand(string trimmed)
         return true;
     }
     return false;
+}
+
+bool TryHandleAnalogThrottleCommand(string payload)
+{
+    if (string.IsNullOrWhiteSpace(payload) || payload.IndexOf(':') < 0)
+        return false;
+
+    bool handled = false;
+    string[] entries = payload.Replace("\r", "").Split('\n');
+    for (int i = 0; i < entries.Length; i++)
+    {
+        string entry = entries[i].Trim();
+        if (string.IsNullOrWhiteSpace(entry))
+            continue;
+
+        string[] parts = entry.Split(':');
+        if (parts.Length != 3)
+            continue;
+
+        string source = parts[0].Trim();
+        string axis = parts[1].Trim();
+        ushort raw;
+        if (!ushort.TryParse(parts[2].Trim(), out raw))
+            continue;
+        if (!AnalogThrottleSourceMatches(source))
+            continue;
+
+        handled = true;
+        if (raw <= ushort.MaxValue / 2)
+            continue;
+
+        if (AnalogThrottleAxisMatches(axis, analogThrottleUpButton))
+            TryHandleMinerLcdCommand("up");
+        else if (AnalogThrottleAxisMatches(axis, analogThrottleApplyButton))
+            TryHandleMinerLcdCommand("apply");
+        else if (AnalogThrottleAxisMatches(axis, analogThrottleDownButton))
+            TryHandleMinerLcdCommand("down");
+    }
+
+    return handled;
+}
+
+bool AnalogThrottleSourceMatches(string source)
+{
+    if (string.IsNullOrWhiteSpace(analogThrottleSourceFilter))
+        return true;
+    return !string.IsNullOrWhiteSpace(source) &&
+           source.IndexOf(analogThrottleSourceFilter, StringComparison.OrdinalIgnoreCase) >= 0;
+}
+
+bool AnalogThrottleAxisMatches(string axis, string configured)
+{
+    if (axis.Equals(configured, StringComparison.OrdinalIgnoreCase))
+        return true;
+
+    string digits = "";
+    for (int i = 0; i < axis.Length; i++)
+        if (char.IsDigit(axis[i]))
+            digits += axis[i];
+    return digits.Equals(configured, StringComparison.OrdinalIgnoreCase);
 }
 
 int GetMinerMenuItemCount()
@@ -2114,6 +2178,8 @@ void RemoteCommand (string command)
         return;
 
     string trimmed = command.Trim();
+    if (TryHandleAnalogThrottleCommand(trimmed))
+        return;
     if (TryHandleMinerLcdCommand(trimmed))
         return;
 
