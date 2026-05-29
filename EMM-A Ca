@@ -6293,17 +6293,56 @@ string StateString(MyIni ini, string key, string fallback)
 {
     if (_hasProgressState)
     {
-        string progress = _progressIni.Get(ProgressIniSection, key).ToString(null);
+        string progress = StateIniGet(_progressIni, ProgressIniSection, key);
         if (progress != null)
             return progress;
     }
-    return ini.Get(StateIniSection, key).ToString(fallback);
+
+    string state = StateIniGet(ini, StateIniSection, key);
+    return state ?? fallback;
 }
 
 bool StateBool(MyIni ini, string key, bool fallback)
 {
     string s = StateString(ini, key, fallback ? "1" : "0");
     return s == "1" || s.Equals("true", StringComparison.OrdinalIgnoreCase);
+}
+
+bool TryNumericSuffix(string key, string prefix, out string suffix)
+{
+    suffix = "";
+    if (!key.StartsWith(prefix, StringComparison.Ordinal) || key.Length == prefix.Length)
+        return false;
+
+    for (int i = prefix.Length; i < key.Length; i++)
+    {
+        char c = key[i];
+        if (c < '0' || c > '9')
+            return false;
+    }
+
+    suffix = key.Substring(prefix.Length);
+    return true;
+}
+
+string CompactStateKey(string key)
+{
+    string n;
+    if (TryNumericSuffix(key, "pathRecord", out n)) return "p" + n;
+    return key;
+}
+
+string StateIniGet(MyIni ini, string section, string key)
+{
+    string compactKey = CompactStateKey(key);
+    if (!string.Equals(compactKey, key, StringComparison.Ordinal))
+    {
+        string compact = ini.Get(section, compactKey).ToString(null);
+        if (compact != null)
+            return compact;
+    }
+
+    return ini.Get(section, key).ToString(null);
 }
 
 IMyTimerBlock FindStateIniTimer()
@@ -6347,13 +6386,6 @@ void SaveState()
     _progressIni.Clear();
     MyIni ini = _stateIni;
     ini.Clear();
-    IMyTimerBlock existingStateTimer = FindStateIniTimer();
-    if (existingStateTimer != null && !string.IsNullOrWhiteSpace(existingStateTimer.CustomData))
-    {
-        MyIniParseResult existingParseResult;
-        if (!ini.TryParse(existingStateTimer.CustomData, out existingParseResult))
-            ini.Clear();
-    }
     ini.Set(StateIniSection, "autopilotEnabled", autopilotEnabled ? "1" : "0");
     ini.Set(StateIniSection, "scriptPaused", scriptPaused ? "1" : "0");
     ini.Set(StateIniSection, "pauseResumeAutopilot", pauseResumeAutopilot ? "1" : "0");
@@ -6391,7 +6423,7 @@ void SaveState()
     ini.Set(StateIniSection, "pathIndex", pathIndex);
     ini.Set(StateIniSection, "pathCount", pathRecords.Count);
     for (int i = 0; i < pathRecords.Count; i++)
-        ini.Set(StateIniSection, "pathRecord" + i, pathRecords[i]);
+        ini.Set(StateIniSection, CompactStateKey("pathRecord" + i), pathRecords[i]);
     ini.Set(StateIniSection, "pathAnchorValid", pathAnchorValid ? "1" : "0");
     ini.Set(StateIniSection, "pathAnchorPos", V3ToString(pathAnchorPos));
     ini.Set(StateIniSection, "pathAnchorForward", V3ToString(pathAnchorForward));
