@@ -25,7 +25,7 @@
 // pathcontinue : resumes queue advancement after pathpause
 // pathstop : stops path mode and clears remaining queued records
 // pathclear : clears the path timer CustomData and resets path recording counters
-// pathrecordundo : fly reverse to last recorded minepose or anchor, then trim undone path points
+// pathrecordundo : fly reverse to last inferred minearea pose or anchor, then trim undone path points
 // pathrecordcancel : fly reverse to anchor, then clear the path timer
 // dock : starts auto-dock sequence (requires fresh carrier connector broadcast and proximity to dock pose)
 // undock : disconnects and flies to shared dock pose while staying aligned
@@ -302,6 +302,9 @@ Vector3D _tickRcPosition = Vector3D.Zero;
 bool rcCanControlGyros = false;
 List<IMyGyro> allGyros = new List<IMyGyro>();
 List<IMyThrust> allThrusters = new List<IMyThrust>();
+List<ThrusterForceSample> effectiveThrustCache = new List<ThrusterForceSample>();
+int effectiveThrustCacheTicks = 0;
+const int effectiveThrustRefreshIntervalTicks = 60;
 List<IMyRadioAntenna> antennas = new List<IMyRadioAntenna>();
 List<IMyBatteryBlock> batteries = new List<IMyBatteryBlock>();
 List<IMyGasTank> hydrogenTanks = new List<IMyGasTank>();
@@ -922,7 +925,7 @@ void SelectMinerCursor()
             return;
         }
         HandlePathRecordMineStep();
-        OpenMinerMenu(MiLcdMenu.SetMinePose);
+        OpenMinerMenu(MiLcdMenu.SetCornerA);
         miMenuIndex = 1;
         return;
     }
@@ -1329,7 +1332,7 @@ void AppendMinerRows(StringBuilder sb)
 
     if (miLcdMenu == MiLcdMenu.SetMinePose)
     {
-        AppendMinerMenuRow(sb, "Set Corner A", 1, false);
+        AppendMinerMenuRow(sb, "Set Corner B", 1, false);
         AppendMinerValueRow(sb, "Depth in meters", 2, miEditingValue && miEditingIndex == 1 ? miEditValue : pathRecordMineDepth, "", "0.0");
         return;
     }
@@ -1479,7 +1482,7 @@ string GetMinerFooterInfo()
         if (miMenuIndex == 1)
         {
             if (pathRecordMineConfirmPending) return "Confirm/adjust Excavation Zone.";
-            return IsExcavationZoneActive() ? "Open Excavation Zone tools." : "Save current mine pose.";
+            return IsExcavationZoneActive() ? "Open Excavation Zone tools." : "Save first mining corner.";
         }
         if (miMenuIndex == 2) return "Meters between points.";
         if (miMenuIndex == 3) return "Finish path within 50 m of dock.";
@@ -1488,7 +1491,7 @@ string GetMinerFooterInfo()
     }
     if (miLcdMenu == MiLcdMenu.SetMinePose)
     {
-        if (miMenuIndex == 1) return "Save first mining corner.";
+        if (miMenuIndex == 1) return "Save second mining corner.";
         if (miMenuIndex == 2) return "Set this mine area's depth.";
     }
     if (miLcdMenu == MiLcdMenu.SetCornerA)
@@ -1730,7 +1733,7 @@ string GetRecordPathExcavationMenuText()
         return "Confirm Excavation Zone";
     if (IsExcavationZoneActive())
         return "Excavation Zone";
-    return "Set mine pose";
+    return "Set Corner A";
 }
 
 bool IsExcavationZoneActive()
@@ -1946,16 +1949,42 @@ double GetEffectiveThrustInDirection(Vector3D direction)
     if (direction.LengthSquared() < 0.001)
         return 0;
     Vector3D dir = Vector3D.Normalize(direction);
+    RefreshEffectiveThrustCacheIfNeeded();
     double total = 0;
+    for (int i = 0; i < effectiveThrustCache.Count; i++)
+    {
+        ThrusterForceSample sample = effectiveThrustCache[i];
+        Vector3D worldForward = Vector3D.TransformNormal(sample.LocalForward, _tickRcMatrix);
+        double dot = Vector3D.Dot(worldForward, dir);
+        if (dot > 0)
+            total += sample.MaxEffectiveThrust * dot;
+    }
+    return total;
+}
+
+void InvalidateEffectiveThrustCache()
+{
+    effectiveThrustCacheTicks = 0;
+    effectiveThrustCache.Clear();
+}
+
+void RefreshEffectiveThrustCacheIfNeeded()
+{
+    if (effectiveThrustCacheTicks > 0)
+    {
+        effectiveThrustCacheTicks--;
+        return;
+    }
+
+    effectiveThrustCache.Clear();
     foreach (var t in allThrusters)
     {
         if (t == null || !t.IsFunctional)
             continue;
-        double dot = Vector3D.Dot(t.WorldMatrix.Forward, dir);
-        if (dot > 0)
-            total += t.MaxEffectiveThrust * dot;
+        Vector3D localForward = Vector3D.TransformNormal(t.WorldMatrix.Forward, MatrixD.Transpose(rc.WorldMatrix));
+        effectiveThrustCache.Add(new ThrusterForceSample(localForward, t.MaxEffectiveThrust));
     }
-    return total;
+    effectiveThrustCacheTicks = effectiveThrustRefreshIntervalTicks;
 }
 
 double GetPointToPointPlannedThrustN(Vector3D direction)
@@ -2331,6 +2360,7 @@ void RemoteCommand (string command)
             DumpCurrentGpsToCustomData();
             break;
         case "cancelmine":
+            ClearPathRecordMineBoundaryLock();
             miningEnabled = false;
             miningState = MiningState.Idle;
             areaMiningMode = false;
@@ -2346,6 +2376,8 @@ void RemoteCommand (string command)
             mineAreaAdjustPendingAfterBackout = false;
             mineAreaAdjustmentDirty = false;
             SetCockpitGyroControl(true);
+            autopilotEnabled = false;
+            hasTarget = false;
             activeMaxSpeed = 0;
             SetDrills(false);
             Echo("Mining cancelled.");
@@ -2680,45 +2712,13 @@ bool UpdatePathRecordState()
     }
 
     SetCockpitGyroControl(false);
-    Vector3D up = pathRecordMineUp;
-    Vector3D forward = pathRecordMineForward;
-    if (up.LengthSquared() < 0.001 || forward.LengthSquared() < 0.001)
+    HoldPathRecordMineOrientation(_tickRcMatrix, pathRecordMineForward, pathRecordMineUp);
+    if (pathRecordMineCorrectionThrustActive)
     {
-        if (pathRecordMineCorrectionThrustActive)
-        {
-            movementResetApplied = false;
-            thrust.Reset();
-            pathRecordMineCorrectionThrustActive = false;
-        }
-        ClearPathRecordMineGyroOverride();
-        return false;
+        movementResetApplied = false;
+        thrust.Reset();
+        pathRecordMineCorrectionThrustActive = false;
     }
-    Vector3D right = Vector3D.Normalize(Vector3D.Cross(forward, up));
-    Vector3D down = -up;
-    Vector3D currentPosition = _tickRcPosition;
-    Vector3D delta = currentPosition - pathRecordMineCornerA;
-    double r = Vector3D.Dot(delta, right);
-    double d = Vector3D.Dot(delta, down);
-    double f = Vector3D.Dot(delta, forward);
-    double clampedR = Math.Max(0, r);
-    double clampedD = Math.Max(0, d);
-    Vector3D allowed = pathRecordMineCornerA + right * clampedR + down * clampedD;
-    if (Math.Abs(f) < 0.05 && Vector3D.DistanceSquared(currentPosition, allowed) < 0.05 * 0.05)
-    {
-        HoldPathRecordMineOrientation(_tickRcMatrix, forward, up);
-        if (pathRecordMineCorrectionThrustActive)
-        {
-            movementResetApplied = false;
-            thrust.Reset();
-            pathRecordMineCorrectionThrustActive = false;
-        }
-        return true;
-    }
-
-    movementResetApplied = false;
-    HoldPathRecordMineOrientation(_tickRcMatrix, forward, up);
-    thrust.ApplyAccel(thrust.ControlPositionFrom(currentPosition, allowed, Vector3D.Zero, SPEEDB));
-    pathRecordMineCorrectionThrustActive = true;
     return true;
 }
 
@@ -2802,28 +2802,21 @@ void StartPathRecordReverseReturn(PathRecordReverseMode mode)
 
         if (lastMineAreaIndex >= 0)
         {
-            int minePoseIndex = -1;
-            Vector3D pos, fwd, up;
-            for (int i = lastMineAreaIndex - 1; i > anchorIndex; i--)
+            Vector3D lastCornerA, lastCornerB, lastAreaUp, lastAreaForward;
+            if (!TryParseMineAreaLine(lines[lastMineAreaIndex], anchorPos,
+                                      out lastCornerA, out lastCornerB, out lastAreaUp, out lastAreaForward, out depth))
             {
-                if (TryParsePathPointLine(lines[i], anchorPos, out pos, out fwd, out up))
-                {
-                    minePoseIndex = i;
-                    break;
-                }
-            }
-            if (minePoseIndex < 0)
-            {
-                Echo("Cannot undo: latest mine area has no preceding minepose path point.");
+                Echo("Cannot undo: latest mine area record is invalid.");
                 return;
             }
 
+            Vector3D pos, fwd, up;
             for (int i = lines.Count - 1; i > lastMineAreaIndex; i--)
             {
                 if (TryParsePathPointLine(lines[i], anchorPos, out pos, out fwd, out up))
                     reverseRecords.Add(lines[i]);
             }
-            reverseRecords.Add(lines[minePoseIndex]);
+            reverseRecords.Add(FormatPathPointLine(GetInferredMineAreaEntryPose(lastCornerA, lastCornerB), anchorPos, lastAreaForward, lastAreaUp));
             keepLineCount = lastMineAreaIndex + 1;
         }
         else
@@ -3047,20 +3040,32 @@ void HandlePathRecordMineStep()
         Echo("Start path recording first: pathrecordstart");
         return;
     }
+    if (pathRecordMineConfirmPending)
+    {
+        Echo("Confirm or cancel the current Excavation Zone first.");
+        return;
+    }
+    if (pathRecordingWaitReturn || pathRecordMineStage == PathRecordMineStage.ReturningToEntry)
+    {
+        Echo("Mine pose is still returning. Wait until the Excavation Zone is ready.");
+        return;
+    }
 
     if (pathRecordMineStage == PathRecordMineStage.Idle)
     {
-        SavePathGpsRecord();
         pathRecordMineEntry = rc.GetPosition();
+        pathRecordMineCornerA = pathRecordMineEntry;
+        pathRecordMineCornerB = Vector3D.Zero;
         // Live recording (soft-lock, return-to-entry, auto-mine) uses the miner's own
         // orientation. The on-disk record projects corners into the anchor's coordinate frame.
         pathRecordMineUp = Vector3D.Normalize(rc.WorldMatrix.Up);
         pathRecordMineForward = Vector3D.Normalize(rc.WorldMatrix.Forward);
         pathRecordingPaused = true;
-        pathRecordMineStage = PathRecordMineStage.EntryCaptured;
+        pathRecordMineStage = PathRecordMineStage.CornerCaptured;
         pathRecordMineCorrectionThrustActive = false;
         SetMineIndicatorSensor(true);
-        Echo("Mine step 1/3 saved. Recording paused and orientation locked.");
+        TriggerPathPointFlash();
+        Echo("Mine step 1/2 saved. Move freely to Corner B.");
         return;
     }
 
@@ -3069,12 +3074,20 @@ void HandlePathRecordMineStep()
         pathRecordMineCornerA = rc.GetPosition();
         pathRecordMineStage = PathRecordMineStage.CornerCaptured;
         TriggerPathPointFlash();
-        Echo("Mine step 2/3 saved. Soft lock active (right/down only).");
+        Echo("Corner A saved. Move freely to Corner B.");
+        return;
+    }
+
+    if (pathRecordMineStage != PathRecordMineStage.CornerCaptured)
+    {
+        Echo("Mine pose is busy. Wait until the current step finishes.");
         return;
     }
 
     Vector3D cornerB = rc.GetPosition();
     pathRecordMineCornerB = cornerB;
+    ProjectMineAreaToShallowPlane(ref pathRecordMineCornerA, ref pathRecordMineCornerB, pathRecordMineForward);
+    pathRecordMineEntry = GetInferredMineAreaEntryPose(pathRecordMineCornerA, pathRecordMineCornerB);
     ClearPathRecordMineBoundaryLock();
     pathRecordMineCounter++;
     Vector3D anchorPos, anchorForward, anchorUp;
@@ -3083,7 +3096,7 @@ void HandlePathRecordMineStep()
         Echo($"Mine area record ready but path timer/anchor missing.");
         return;
     }
-    string rec = FormatMineAreaLine(pathRecordMineCornerA, cornerB, anchorPos, pathRecordMineForward, pathRecordMineUp, pathRecordMineDepth);
+    string rec = FormatMineAreaLine(pathRecordMineCornerA, pathRecordMineCornerB, anchorPos, pathRecordMineForward, pathRecordMineUp, pathRecordMineDepth);
     if (!AppendPathRecordLine(rec))
     {
         Echo($"Mine area record ready but timer tag '{pathTimerTag}' not found.");
@@ -3101,6 +3114,24 @@ void HandlePathRecordMineStep()
     pathRecordingWaitReturn = true;
     pathRecordMineStage = PathRecordMineStage.ReturningToEntry;
     Echo("Mine area saved. Returning to entry point...");
+}
+
+void ProjectMineAreaToShallowPlane(ref Vector3D cornerA, ref Vector3D cornerB, Vector3D forward)
+{
+    if (forward.LengthSquared() < 0.001)
+        return;
+
+    Vector3D fwd = Vector3D.Normalize(forward);
+    double depthA = Vector3D.Dot(cornerA, fwd);
+    double depthB = Vector3D.Dot(cornerB, fwd);
+    double shallowDepth = Math.Min(depthA, depthB);
+    cornerA -= fwd * (depthA - shallowDepth);
+    cornerB -= fwd * (depthB - shallowDepth);
+}
+
+Vector3D GetInferredMineAreaEntryPose(Vector3D cornerA, Vector3D cornerB)
+{
+    return (cornerA + cornerB) * 0.5;
 }
 
 // SE-style GPS string for human copy-paste (used by `dumpgps` only). Persistent records use
@@ -4061,6 +4092,8 @@ void SetAdjustedMineAreaCorner()
     else
         areaPlanCornerB = rc.GetPosition();
 
+    ProjectMineAreaToShallowPlane(ref areaPlanCornerA, ref areaPlanCornerB, areaPlanForward);
+    areaMineEntryPos = GetInferredMineAreaEntryPose(areaPlanCornerA, areaPlanCornerB);
     Vector3D right = Vector3D.Cross(areaPlanForward, areaPlanUp);
     if (right.LengthSquared() > 0.001)
         right = Vector3D.Normalize(right);
@@ -4098,7 +4131,10 @@ bool RewriteCurrentMineAreaRecord(bool saveToCarrier)
     {
         ok = ReplacePathTimerLine(pathRecordPendingMineAreaLine, newLine);
         if (ok)
+        {
             pathRecordPendingMineAreaLine = newLine;
+            pathRecordMineEntry = GetInferredMineAreaEntryPose(areaPlanCornerA, areaPlanCornerB);
+        }
     }
     else if (activeMineAreaRecordIndex >= 0)
     {
@@ -4303,9 +4339,16 @@ void AddRecallRecordIfRunnable(string rawRecord, int displayDone)
     string record = NormalizePathRecord(rawRecord);
     if (string.IsNullOrWhiteSpace(record))
         return;
+    if (LineLooksLikeMineArea(record) && pathAnchorValid)
+    {
+        Vector3D cornerA, cornerB, areaUp, areaForward;
+        double depth;
+        if (TryParseMineAreaLine(record, pathAnchorPos, out cornerA, out cornerB, out areaUp, out areaForward, out depth))
+            AddRecallRecord(FormatPathPointLine(GetInferredMineAreaEntryPose(cornerA, cornerB), pathAnchorPos, areaForward, areaUp), displayDone);
+        return;
+    }
     if (record.Equals("undock", StringComparison.OrdinalIgnoreCase) ||
-        record.StartsWith("minearea;", StringComparison.OrdinalIgnoreCase) ||
-        LineLooksLikeMineArea(record))
+        record.StartsWith("minearea;", StringComparison.OrdinalIgnoreCase))
         return;
     AddRecallRecord(record, displayDone);
 }
@@ -4893,6 +4936,7 @@ void RecompileFlightSystems()
     rcCanControlGyros = rc != null && rc.GetProperty("ControlGyros") != null;
     allGyros = GetBlocks<IMyGyro>().FindAll(b => HasMinerTag(b));
     allThrusters = GetBlocks<IMyThrust>().FindAll(b => HasMinerTag(b));
+    InvalidateEffectiveThrustCache();
     thrust = new ThrusterControl(rc, tickSpeed, allThrusters);
     gyros = new GyroControl(rc, tickSpeed, allGyros);
 }
@@ -5172,6 +5216,7 @@ void ApplyDockedPowerState()
 {
     foreach (var g in allGyros)      if (HasMinerTag(g)) g.Enabled = false;
     foreach (var t in allThrusters)  if (HasMinerTag(t)) t.Enabled = false;
+    InvalidateEffectiveThrustCache();
     foreach (var a in antennas)      if (HasMinerTag(a)) a.Enabled = false;
     foreach (var b in batteries)     if (HasMinerTag(b)) b.ChargeMode = ChargeMode.Recharge;
     foreach (var h in hydrogenTanks) if (HasMinerTag(h)) h.Stockpile = true;
@@ -5181,6 +5226,7 @@ void ApplyUndockedPowerState()
 {
     foreach (var g in allGyros)      if (HasMinerTag(g)) g.Enabled = true;
     foreach (var t in allThrusters)  if (HasMinerTag(t)) t.Enabled = true;
+    InvalidateEffectiveThrustCache();
     foreach (var a in antennas)      if (HasMinerTag(a)) a.Enabled = true;
     foreach (var b in batteries)     if (HasMinerTag(b)) b.ChargeMode = ChargeMode.Auto;
     foreach (var h in hydrogenTanks) if (HasMinerTag(h)) h.Stockpile = false;
@@ -5610,6 +5656,19 @@ bool ExecutePathRecord(string rawRecord)
         if (!TryParseMineAreaLine(record, pathAnchorPos,
                                   out cornerA, out cornerB, out areaUp, out areaForward, out depth))
             return false;
+        Vector3D entryPose = GetInferredMineAreaEntryPose(cornerA, cornerB);
+        if (!IsAtTargetPose(entryPose, areaForward, areaUp))
+        {
+            pathIndex = Math.Max(0, pathIndex - 1);
+            targetPosition = entryPose;
+            desiredForward = areaForward;
+            desiredUp = areaUp;
+            hasTarget = true;
+            autopilotEnabled = true;
+            activeMaxSpeed = SPEEDB;
+            return true;
+        }
+
         activeMineAreaRecordIndex = Math.Max(0, pathIndex - 1);
         activeMineAreaRecordLine = record;
         StartAreaMiningWithCorners(cornerA, cornerB, areaUp, areaForward, depth);
@@ -7780,15 +7839,46 @@ const double thrustD = 5;
 const double thrustDecay = 0.2;
 const float minThrust = 1.0000001f;
 
+class ThrusterForceSample
+{
+    public Vector3D LocalForward;
+    public double MaxEffectiveThrust;
+
+    public ThrusterForceSample(Vector3D localForward, double maxEffectiveThrust)
+    {
+        LocalForward = localForward;
+        MaxEffectiveThrust = maxEffectiveThrust;
+    }
+}
+
 class ThrusterControl
 {
     private List<IMyThrust> thrusters = new List<IMyThrust>();
+    private List<ThrusterDriveSample> thrustCache = new List<ThrusterDriveSample>();
     IMyShipController rc;
 
     VectorPID pid;
     double cachedTotalMass = 0;
     int massCacheTicks = 0;
     const int massRefreshIntervalTicks = 10;
+    int thrustCacheTicks = 0;
+    const int thrustRefreshIntervalTicks = 60;
+
+    class ThrusterDriveSample
+    {
+        public IMyThrust Block;
+        public Vector3D LocalForward;
+        public float MaxEffectiveThrust;
+        public float MaxThrust;
+
+        public ThrusterDriveSample(IMyThrust block, Vector3D localForward, float maxEffectiveThrust, float maxThrust)
+        {
+            Block = block;
+            LocalForward = localForward;
+            MaxEffectiveThrust = maxEffectiveThrust;
+            MaxThrust = maxThrust;
+        }
+    }
 
     public void Reset ()
     {
@@ -7812,7 +7902,32 @@ class ThrusterControl
         pid = new VectorPID(thrustP / factor, thrustI / factor, thrustD / factor, thrustDecay / factor, secondsPerTick);
         this.rc = rc;
         this.thrusters = thrusters;
+        RefreshThrustCache();
         Reset();
+    }
+
+    void RefreshThrustCache()
+    {
+        thrustCache.Clear();
+        MatrixD rcTranspose = MatrixD.Transpose(rc.WorldMatrix);
+        foreach (IMyThrust t in thrusters)
+        {
+            if (t == null || !t.IsFunctional || t.MaxEffectiveThrust <= 0 || t.MaxThrust <= 0)
+                continue;
+            Vector3D localForward = Vector3D.TransformNormal(t.WorldMatrix.Forward, rcTranspose);
+            thrustCache.Add(new ThrusterDriveSample(t, localForward, t.MaxEffectiveThrust, t.MaxThrust));
+        }
+        thrustCacheTicks = thrustRefreshIntervalTicks;
+    }
+
+    void RefreshThrustCacheIfNeeded()
+    {
+        if (thrustCacheTicks > 0)
+        {
+            thrustCacheTicks--;
+            return;
+        }
+        RefreshThrustCache();
     }
 
     public Vector3D ControlPosition (Vector3D targetPosition, Vector3D targetVelocity, double maxSpeed = double.PositiveInfinity)
@@ -7892,19 +8007,22 @@ class ThrusterControl
         if (thrustLength > maxTotalThrust && thrustLength > 0)
             thrust *= maxTotalThrust / thrustLength;
 
-        foreach (IMyThrust t in thrusters)
+        RefreshThrustCacheIfNeeded();
+        for (int i = 0; i < thrustCache.Count; i++)
         {
-            if (!t.IsFunctional)
+            ThrusterDriveSample sample = thrustCache[i];
+            IMyThrust t = sample.Block;
+            if (t == null || !t.IsFunctional)
                 continue;
 
-            Vector3D thrustForward = t.WorldMatrix.Forward;
+            Vector3D thrustForward = Vector3D.TransformNormal(sample.LocalForward, rc.WorldMatrix);
             float outputThrust = (float)Vector3D.Dot(thrustForward, thrust);
             if (outputThrust > 0)
             {
-                float outputProportion = MathHelper.Clamp(outputThrust / t.MaxEffectiveThrust, minThrust / t.MaxThrust, 1);
+                float outputProportion = MathHelper.Clamp(outputThrust / sample.MaxEffectiveThrust, minThrust / sample.MaxThrust, 1);
                 if (Math.Abs(t.ThrustOverridePercentage - outputProportion) > 0.001f)
                     t.ThrustOverridePercentage = outputProportion;
-                thrust -= thrustForward * outputProportion * t.MaxEffectiveThrust;
+                thrust -= thrustForward * outputProportion * sample.MaxEffectiveThrust;
             }
             else
             {
