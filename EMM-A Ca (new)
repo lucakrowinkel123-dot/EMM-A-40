@@ -4450,26 +4450,10 @@ string FormatAsteroidDbPathLine(List<string> pathLines, int index)
     if (pathLines == null || index < 0 || index >= pathLines.Count)
         return "";
 
-    string line = pathLines[index];
-    if (index == 0 ||
-        LineLooksLikeAsteroidDbMineArea(line) ||
-        (index + 1 < pathLines.Count && LineLooksLikeAsteroidDbMineArea(pathLines[index + 1])))
-        return line == null ? "" : line.Trim();
-
-    return FormatAsteroidDbPathPointLine(line);
+    return FormatAsteroidDbCompactRecordLine(pathLines[index]);
 }
 
-bool LineLooksLikeAsteroidDbMineArea(string line)
-{
-    if (string.IsNullOrWhiteSpace(line))
-        return false;
-    string trimmed = line.Trim();
-    if (trimmed.StartsWith("minearea;", StringComparison.OrdinalIgnoreCase))
-        return true;
-    return trimmed.Split(':').Length == 4;
-}
-
-string FormatAsteroidDbPathPointLine(string line)
+string FormatAsteroidDbCompactRecordLine(string line)
 {
     if (string.IsNullOrWhiteSpace(line))
         return line;
@@ -4478,25 +4462,57 @@ string FormatAsteroidDbPathPointLine(string line)
     if (trimmed.Equals("undock", StringComparison.OrdinalIgnoreCase) ||
         trimmed.Equals("dock", StringComparison.OrdinalIgnoreCase))
         return trimmed;
-
-    string[] parts = trimmed.Split(':');
-    if (parts.Length != 2)
+    if (trimmed.StartsWith("minearea;", StringComparison.OrdinalIgnoreCase))
         return trimmed;
 
+    string[] parts = trimmed.Split(':');
+    if (parts.Length == 2)
+        return FormatAsteroidDbPoseLine(parts, trimmed);
+    if (parts.Length == 4)
+        return FormatAsteroidDbMineAreaLine(parts, trimmed);
+
+    return trimmed;
+}
+
+string FormatAsteroidDbPoseLine(string[] parts, string fallback)
+{
     string[] xyz = parts[0].Split(',');
     string[] rot = parts[1].Split(',');
     if (xyz.Length != 3 || rot.Length != 4)
-        return trimmed;
+        return fallback;
 
     double x, y, z;
     if (!double.TryParse(xyz[0].Trim(), out x) ||
         !double.TryParse(xyz[1].Trim(), out y) ||
         !double.TryParse(xyz[2].Trim(), out z))
-        return trimmed;
+        return fallback;
 
     return FormatCompactMeters(x) + "," + FormatCompactMeters(y) + "," + FormatCompactMeters(z) + ":" +
            FormatCompactDecimal(rot[0]) + "," + FormatCompactDecimal(rot[1]) + "," +
            FormatCompactDecimal(rot[2]) + "," + FormatCompactDecimal(rot[3]);
+}
+
+string FormatAsteroidDbMineAreaLine(string[] parts, string fallback)
+{
+    string[] xyz = parts[0].Split(',');
+    string[] rot = parts[1].Split(',');
+    string[] wh  = parts[2].Split(',');
+    if (xyz.Length != 3 || rot.Length != 4 || wh.Length != 2)
+        return fallback;
+
+    double x, y, z, w, h;
+    if (!double.TryParse(xyz[0].Trim(), out x) ||
+        !double.TryParse(xyz[1].Trim(), out y) ||
+        !double.TryParse(xyz[2].Trim(), out z) ||
+        !double.TryParse(wh[0].Trim(), out w) ||
+        !double.TryParse(wh[1].Trim(), out h))
+        return fallback;
+
+    return FormatCompactMeters(x) + "," + FormatCompactMeters(y) + "," + FormatCompactMeters(z) + ":" +
+           FormatCompactDecimal(rot[0]) + "," + FormatCompactDecimal(rot[1]) + "," +
+           FormatCompactDecimal(rot[2]) + "," + FormatCompactDecimal(rot[3]) + ":" +
+           FormatCompactMeters(w) + "," + FormatCompactMeters(h) + ":" +
+           FormatCompactDecimal(parts[3]);
 }
 
 string FormatCompactMeters(double value)

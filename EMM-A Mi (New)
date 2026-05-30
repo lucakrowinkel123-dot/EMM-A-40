@@ -763,6 +763,73 @@ bool TryHandleMinerLcdCommand(string trimmed)
     return false;
 }
 
+bool TryHandleAnalogThrottleCommand(string payload)
+{
+    if (string.IsNullOrWhiteSpace(payload) || payload.IndexOf(':') < 0)
+        return false;
+
+    bool handled = false;
+    string[] entries = payload.Replace("\r", "").Split('\n');
+    for (int i = 0; i < entries.Length; i++)
+    {
+        string entry = entries[i].Trim();
+        if (string.IsNullOrWhiteSpace(entry))
+            continue;
+
+        string[] parts = entry.Split(':');
+        if (parts.Length != 3)
+            continue;
+
+        string source = parts[0].Trim();
+        string axis = parts[1].Trim();
+        ushort raw;
+        if (!ushort.TryParse(parts[2].Trim(), out raw))
+            continue;
+        if (!AnalogThrottleSourceMatches(source))
+            continue;
+
+        handled = true;
+        if (raw <= ushort.MaxValue / 2)
+            continue;
+
+        if (AnalogThrottleAxisMatches(axis, analogThrottleUpButton))
+            TryHandleMinerLcdCommand("up");
+        else if (AnalogThrottleAxisMatches(axis, analogThrottleApplyButton))
+            TryHandleMinerLcdCommand("apply");
+        else if (AnalogThrottleAxisMatches(axis, analogThrottleDownButton))
+            TryHandleMinerLcdCommand("down");
+    }
+
+    return handled;
+}
+
+bool AnalogThrottleSourceMatches(string source)
+{
+    if (string.IsNullOrWhiteSpace(analogThrottleSourceFilter))
+        return true;
+    return !string.IsNullOrWhiteSpace(source) &&
+           source.IndexOf(analogThrottleSourceFilter, StringComparison.OrdinalIgnoreCase) >= 0;
+}
+
+bool AnalogThrottleAxisMatches(string axis, string configured)
+{
+    if (axis.Equals(configured, StringComparison.OrdinalIgnoreCase))
+        return true;
+
+    string axisDigits = "";
+    for (int i = 0; i < axis.Length; i++)
+        if (char.IsDigit(axis[i]))
+            axisDigits += axis[i];
+
+    string configuredDigits = "";
+    for (int i = 0; i < configured.Length; i++)
+        if (char.IsDigit(configured[i]))
+            configuredDigits += configured[i];
+
+    return axisDigits.Length > 0 &&
+           axisDigits.Equals(configuredDigits, StringComparison.OrdinalIgnoreCase);
+}
+
 int GetMinerMenuItemCount()
 {
     if (miLcdMenu == MiLcdMenu.Main) return 4;
