@@ -820,11 +820,18 @@ bool AnalogThrottleAxisMatches(string axis, string configured)
     if (axis.Equals(configured, StringComparison.OrdinalIgnoreCase))
         return true;
 
-    string digits = "";
+    string axisDigits = "";
     for (int i = 0; i < axis.Length; i++)
         if (char.IsDigit(axis[i]))
-            digits += axis[i];
-    return digits.Equals(configured, StringComparison.OrdinalIgnoreCase);
+            axisDigits += axis[i];
+
+    string configuredDigits = "";
+    for (int i = 0; i < configured.Length; i++)
+        if (char.IsDigit(configured[i]))
+            configuredDigits += configured[i];
+
+    return axisDigits.Length > 0 &&
+           axisDigits.Equals(configuredDigits, StringComparison.OrdinalIgnoreCase);
 }
 
 int GetMinerMenuItemCount()
