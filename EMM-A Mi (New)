@@ -1975,7 +1975,9 @@ void Move ()
 
 bool UsePointToPointPrecisionAutopilot()
 {
-    return dockingState == DockingState.None && !miningEnabled;
+    return dockingState == DockingState.None &&
+           !miningEnabled &&
+           mineAreaAdjustStage == MineAreaAdjustStage.None;
 }
 
 double GetPointToPointSafeSpeed(Vector3D toTarget, double tolerance)
@@ -4068,7 +4070,7 @@ bool UpdateMineAreaAdjustState()
 
     if (mineAreaAdjustStage == MineAreaAdjustStage.ToMinePose)
     {
-        if (IsAtTargetPose(areaMineEntryPos, areaPlanForward, areaPlanUp))
+        if (IsAtTargetPosition(areaMineEntryPos))
         {
             targetPosition = mineAreaAdjustCornerA ? areaPlanCornerA : areaPlanCornerB;
             desiredUp = areaPlanUp;
@@ -4085,7 +4087,7 @@ bool UpdateMineAreaAdjustState()
     if (mineAreaAdjustStage == MineAreaAdjustStage.ToCorner)
     {
         Vector3D corner = mineAreaAdjustCornerA ? areaPlanCornerA : areaPlanCornerB;
-        if (IsAtTargetPose(corner, areaPlanForward, areaPlanUp))
+        if (IsAtTargetPosition(corner))
         {
             autopilotEnabled = false;
             hasTarget = false;
@@ -4104,7 +4106,7 @@ bool UpdateMineAreaAdjustState()
 
     if (mineAreaAdjustStage == MineAreaAdjustStage.ReturnToMinePoseAfterSet)
     {
-        if (IsAtTargetPose(areaMineEntryPos, areaPlanForward, areaPlanUp))
+        if (IsAtTargetPosition(areaMineEntryPos))
         {
             autopilotEnabled = false;
             hasTarget = false;
