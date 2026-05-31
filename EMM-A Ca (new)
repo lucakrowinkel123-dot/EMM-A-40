@@ -4460,7 +4460,14 @@ string FormatAsteroidDbPathLine(List<string> pathLines, int index)
     if (pathLines == null || index < 0 || index >= pathLines.Count)
         return "";
 
-    return EncodeAsteroidDbPathLine(FormatAsteroidDbCompactRecordLine(pathLines[index]));
+    return EncodeAsteroidDbPathLine(ApplyAsteroidDbNegativeCommaShorthand(FormatAsteroidDbCompactRecordLine(pathLines[index])));
+}
+
+string ApplyAsteroidDbNegativeCommaShorthand(string line)
+{
+    if (string.IsNullOrEmpty(line))
+        return line;
+    return line.Replace(",-", "-");
 }
 
 string EncodeAsteroidDbPathLine(string line)
@@ -4481,20 +4488,24 @@ string EncodeAsteroidDbPathLine(string line)
 
 string DecodeAsteroidDbPathLine(string line)
 {
-    if (string.IsNullOrWhiteSpace(line) || !LoadAsteroidCodecMaps())
+    if (string.IsNullOrWhiteSpace(line))
         return line;
 
-    var sb = new StringBuilder(line.Length);
-    for (int i = 0; i < line.Length;)
+    string encoded = line;
+    if (!LoadAsteroidCodecMaps())
+        return ExpandAsteroidDbNegativeCommaShorthand(encoded);
+
+    var sb = new StringBuilder(encoded.Length);
+    for (int i = 0; i < encoded.Length;)
     {
         AsteroidCodecEntry match = null;
         for (int j = 0; j < _asteroidCodecDecode.Count; j++)
         {
             AsteroidCodecEntry entry = _asteroidCodecDecode[j];
             string token = entry.Token;
-            if (string.IsNullOrEmpty(token) || i + token.Length > line.Length)
+            if (string.IsNullOrEmpty(token) || i + token.Length > encoded.Length)
                 continue;
-            if (string.Compare(line, i, token, 0, token.Length, StringComparison.Ordinal) == 0)
+            if (string.Compare(encoded, i, token, 0, token.Length, StringComparison.Ordinal) == 0)
             {
                 match = entry;
                 break;
@@ -4508,11 +4519,34 @@ string DecodeAsteroidDbPathLine(string line)
         }
         else
         {
-            sb.Append(line[i]);
+            sb.Append(encoded[i]);
             i++;
         }
     }
+    return ExpandAsteroidDbNegativeCommaShorthand(sb.ToString());
+}
+
+string ExpandAsteroidDbNegativeCommaShorthand(string line)
+{
+    if (string.IsNullOrEmpty(line))
+        return line;
+
+    var sb = new StringBuilder(line.Length + 8);
+    for (int i = 0; i < line.Length; i++)
+    {
+        char c = line[i];
+        if (c == '-' && i > 0 && i + 1 < line.Length &&
+            IsAsteroidDbNumberChar(line[i - 1]) &&
+            IsAsteroidDbNumberChar(line[i + 1]))
+            sb.Append(',');
+        sb.Append(c);
+    }
     return sb.ToString();
+}
+
+bool IsAsteroidDbNumberChar(char c)
+{
+    return (c >= '0' && c <= '9') || c == '.';
 }
 
 bool LoadAsteroidCodecMaps()
