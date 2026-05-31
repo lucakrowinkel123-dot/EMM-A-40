@@ -3919,7 +3919,7 @@ void ConfirmCurrentExcavationZoneAdjustment()
 void StartMineAreaCornerAdjustment(bool cornerA)
 {
     ReleasePathRecordMineConfirmHold();
-    if (!areaPlanValid)
+    if (!EnsureMineAreaAdjustmentPlanLoaded())
     {
         Echo("Adjust denied: no Excavation Zone is loaded.");
         return;
@@ -3958,6 +3958,44 @@ void StartMineAreaCornerAdjustment(bool cornerA)
     }
 
     BeginMineAreaCornerAdjustmentFlight(cornerA);
+}
+
+bool EnsureMineAreaAdjustmentPlanLoaded()
+{
+    if (areaPlanValid)
+        return true;
+
+    if (!pathRecordMineConfirmPending)
+        return false;
+
+    if ((pathRecordMineCornerB - pathRecordMineCornerA).LengthSquared() <= 0.01 ||
+        pathRecordMineUp.LengthSquared() < 0.001 ||
+        pathRecordMineForward.LengthSquared() < 0.001)
+        return false;
+
+    Vector3D up = Vector3D.Normalize(pathRecordMineUp);
+    Vector3D forward = Vector3D.Normalize(pathRecordMineForward);
+    Vector3D right = Vector3D.Cross(forward, up);
+    if (right.LengthSquared() < 0.001)
+        return false;
+    right = Vector3D.Normalize(right);
+
+    if (!ConfigureAreaLanePlan(pathRecordMineCornerA, pathRecordMineCornerB, up, right, MINEH, MINEW))
+        return false;
+
+    areaPlanValid = true;
+    areaPlanCornerA = pathRecordMineCornerA;
+    areaPlanCornerB = pathRecordMineCornerB;
+    areaPlanUp = up;
+    areaPlanForward = forward;
+    areaPlanRight = right;
+    areaMineEntryPos = GetInferredMineAreaEntryPose(areaPlanCornerA, areaPlanCornerB);
+    areaMineEntryForward = forward;
+    areaMineEntryUp = up;
+    laneDepth = Math.Max(0.1, pathRecordMineDepth);
+    pathRecordMineDepth = laneDepth;
+    drillAxis = forward;
+    return true;
 }
 
 void BeginMineAreaCornerAdjustmentFlight(bool cornerA)
