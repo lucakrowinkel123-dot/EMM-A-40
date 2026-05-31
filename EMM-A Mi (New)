@@ -236,7 +236,6 @@ bool mineAreaAdjustSaveToCarrier = false;
 bool mineAreaAdjustmentDirty = false;
 bool mineAreaAdjustPendingAfterBackout = false;
 bool mineAreaAdjustPendingCornerA = true;
-bool mineAreaAdjustCorrectionThrustActive = false;
 int activeMineAreaRecordIndex = -1;
 string activeMineAreaRecordLine = "";
 bool appendPathActive = false;
@@ -2334,7 +2333,6 @@ void RemoteCommand (string command)
             mineAreaAdjustStage = MineAreaAdjustStage.None;
             mineAreaAdjustmentDirty = false;
             mineAreaAdjustPendingAfterBackout = false;
-            mineAreaAdjustCorrectionThrustActive = false;
             appendPathActive = false;
             appendPathStopRecordIndex = -1;
             suppressPathRuntimeWrite = false;
@@ -2611,7 +2609,6 @@ void StopPathRecording()
     mineAreaAdjustStage = MineAreaAdjustStage.None;
     mineAreaAdjustmentDirty = false;
     mineAreaAdjustPendingAfterBackout = false;
-    mineAreaAdjustCorrectionThrustActive = false;
     if (pathRecordMineCorrectionThrustActive)
     {
         movementResetApplied = false;
@@ -3667,7 +3664,6 @@ void StopPathExecution()
     mineAreaAdjustStage = MineAreaAdjustStage.None;
     mineAreaAdjustPendingAfterBackout = false;
     mineAreaAdjustmentDirty = false;
-    mineAreaAdjustCorrectionThrustActive = false;
     SetCockpitGyroControl(true);
     ResetPathRunTimer();
     pathAnchorValid = false;
@@ -4022,12 +4018,6 @@ void CancelMineAreaAdjustment()
 {
     mineAreaAdjustStage = MineAreaAdjustStage.None;
     mineAreaAdjustPendingAfterBackout = false;
-    if (mineAreaAdjustCorrectionThrustActive)
-    {
-        movementResetApplied = false;
-        thrust.Reset();
-        mineAreaAdjustCorrectionThrustActive = false;
-    }
     SetCockpitGyroControl(true);
 }
 
@@ -4064,12 +4054,6 @@ bool UpdateMineAreaAdjustState()
             hasTarget = false;
             activeMaxSpeed = 0;
             mineAreaAdjustStage = MineAreaAdjustStage.Editing;
-            if (mineAreaAdjustCorrectionThrustActive)
-            {
-                movementResetApplied = false;
-                thrust.Reset();
-                mineAreaAdjustCorrectionThrustActive = false;
-            }
             Echo("Adjust Corner " + (mineAreaAdjustCornerA ? "A" : "B") + ": set new corner when ready.");
         }
         return false;
@@ -4084,12 +4068,6 @@ bool UpdateMineAreaAdjustState()
             activeMaxSpeed = 0;
             mineAreaAdjustStage = MineAreaAdjustStage.None;
             SetCockpitGyroControl(true);
-            if (mineAreaAdjustCorrectionThrustActive)
-            {
-                movementResetApplied = false;
-                thrust.Reset();
-                mineAreaAdjustCorrectionThrustActive = false;
-            }
             OpenMinerMenu(MiLcdMenu.AdjustExcavationZone);
             miMenuIndex = 1;
             Echo("Excavation Zone adjusted. Confirm to rerun.");
@@ -4097,25 +4075,6 @@ bool UpdateMineAreaAdjustState()
         return false;
     }
 
-    Vector3D current = _tickRcPosition;
-    double f = Vector3D.Dot(current - areaMineEntryPos, areaPlanForward);
-    if (Math.Abs(f) < 0.25)
-    {
-        if (mineAreaAdjustCorrectionThrustActive)
-        {
-            movementResetApplied = false;
-            thrust.Reset();
-            mineAreaAdjustCorrectionThrustActive = false;
-        }
-        return true;
-    }
-
-    movementResetApplied = false;
-    double forwardSpeed = Vector3D.Dot(rc.GetShipVelocities().LinearVelocity, areaPlanForward);
-    double maxCorrection = Math.Min(1.0, Math.Max(0.2, SPEEDB * 0.25));
-    double correction = MathHelper.Clamp(f * 0.8 + forwardSpeed * 0.8, -maxCorrection, maxCorrection);
-    thrust.ApplyAccel(areaPlanForward * correction, GetShipMass() * maxCorrection);
-    mineAreaAdjustCorrectionThrustActive = true;
     return true;
 }
 
