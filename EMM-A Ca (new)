@@ -4467,7 +4467,34 @@ string ApplyAsteroidDbNegativeCommaShorthand(string line)
 {
     if (string.IsNullOrEmpty(line))
         return line;
-    return line.Replace(",-", "-");
+
+    var sb = new StringBuilder(line.Length);
+    bool numberHasDot = false;
+    for (int i = 0; i < line.Length; i++)
+    {
+        char c = line[i];
+        if (c == ',' && i + 1 < line.Length)
+        {
+            char next = line[i + 1];
+            if (next == '-')
+            {
+                numberHasDot = false;
+                continue;
+            }
+            if (next == '.' && numberHasDot)
+            {
+                numberHasDot = false;
+                continue;
+            }
+        }
+
+        sb.Append(c);
+        if (c == '.')
+            numberHasDot = true;
+        else if (c == ',' || c == ':')
+            numberHasDot = false;
+    }
+    return sb.ToString();
 }
 
 string EncodeAsteroidDbPathLine(string line)
@@ -4532,14 +4559,28 @@ string ExpandAsteroidDbNegativeCommaShorthand(string line)
         return line;
 
     var sb = new StringBuilder(line.Length + 8);
+    bool numberHasDot = false;
     for (int i = 0; i < line.Length; i++)
     {
         char c = line[i];
         if (c == '-' && i > 0 && i + 1 < line.Length &&
             IsAsteroidDbNumberChar(line[i - 1]) &&
             IsAsteroidDbNumberChar(line[i + 1]))
+        {
             sb.Append(',');
+            numberHasDot = false;
+        }
+        else if (c == '.' && numberHasDot && i + 1 < line.Length && IsAsteroidDbNumberChar(line[i + 1]))
+        {
+            sb.Append(',');
+            numberHasDot = false;
+        }
+
         sb.Append(c);
+        if (c == '.')
+            numberHasDot = true;
+        else if (c == ',' || c == ':')
+            numberHasDot = false;
     }
     return sb.ToString();
 }
