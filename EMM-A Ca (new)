@@ -4536,12 +4536,16 @@ bool LoadAsteroidCodecMaps()
         if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith("//"))
             continue;
 
-        int eq = raw.IndexOf('=');
-        if (eq <= 0 || eq >= raw.Length - 1)
+        int sep = raw.IndexOf(' ');
+        if (sep < 0)
+            sep = raw.IndexOf('\t');
+        if (sep < 0)
+            sep = raw.IndexOf('=');
+        if (sep <= 0 || sep >= raw.Length - 1)
             continue;
 
-        string token = raw.Substring(0, eq).Trim();
-        string value = raw.Substring(eq + 1);
+        string token = raw.Substring(0, sep).Trim();
+        string value = raw.Substring(sep + 1).TrimStart();
         if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(value))
             continue;
 
