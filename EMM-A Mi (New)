@@ -166,6 +166,14 @@ double areaPlanRowStart = 0;
 double areaPlanRowStep = 0;
 double areaPlanColStart = 0;
 double areaPlanColStep = 0;
+const string mineAreaSkipMetaPrefix = "00;";
+const string mineAreaSkipMetaLegacyEncodedPrefix = "minearea_skip$";
+const string mineAreaSkipMetaLegacyPrefix = "minearea_skip;";
+const string mineAreaSkipMetaKey = "EMM-A-MI";
+List<int> areaSkipLaneIndexes = new List<int>(); // zero-based lanes loaded from the metadata line below the minearea
+List<int> areaEmptyLaneIndexes = new List<int>(); // zero-based lanes proven empty during this run
+bool areaCurrentLaneSawOre = false;
+bool suppressCurrentLaneEmptyRecord = false;
 bool retryCurrentLane = false;
 bool returnToMinePoseAfterArea = false;
 bool finishAreaAfterBackout = false;
@@ -2313,10 +2321,13 @@ void RemoteCommand (string command)
             areaLaneIndex = 0;
             areaLaneCount = 0;
             areaPlanValid = false;
+            ClearAreaLaneSkipState();
             retryCurrentLane = false;
             stuckRetryCount = 0;
             finishAreaAfterBackout = false;
             returnToMinePoseAfterArea = false;
+            activeMineAreaRecordIndex = -1;
+            activeMineAreaRecordLine = "";
             pathMode = false;
             pathPaused = false;
             pathPausedNavResume = false;
@@ -2374,9 +2385,12 @@ void RemoteCommand (string command)
             areaLaneIndex = 0;
             areaLaneCount = 0;
             areaPlanValid = false;
+            ClearAreaLaneSkipState();
             retryCurrentLane = false;
             finishAreaAfterBackout = false;
             returnToMinePoseAfterArea = false;
+            activeMineAreaRecordIndex = -1;
+            activeMineAreaRecordLine = "";
             resumePathRecordingAfterMineArea = false;
             mineAreaAdjustStage = MineAreaAdjustStage.None;
             mineAreaAdjustPendingAfterBackout = false;
@@ -2482,7 +2496,11 @@ void RemoteCommand (string command)
             if (trimmed.StartsWith("minelane;", StringComparison.OrdinalIgnoreCase))
                 StartSingleLaneMining(trimmed);
             else if (trimmed.StartsWith("minearea;", StringComparison.OrdinalIgnoreCase))
+            {
+                activeMineAreaRecordIndex = -1;
+                activeMineAreaRecordLine = "";
                 StartAreaMining(trimmed);
+            }
             break;
     }
 }
@@ -3107,6 +3125,14 @@ void HandlePathRecordMineStep()
         Echo($"Mine area record ready but timer tag '{pathTimerTag}' not found.");
         return;
     }
+    int estimatedLaneCount;
+    if (TryEstimateMineAreaLaneCount(pathRecordMineCornerA, pathRecordMineCornerB, pathRecordMineUp, pathRecordMineForward, out estimatedLaneCount))
+    {
+        List<int> emptySkipList = new List<int>();
+        AppendPathRecordLine(FormatMineAreaSkipMetaLine(MINEH, MINEW, estimatedLaneCount, emptySkipList));
+    }
+    activeMineAreaRecordIndex = FindPathTimerRecordIndexByLine(rec);
+    activeMineAreaRecordLine = rec;
     pathRecordPendingMineAreaLine = rec;
     TriggerPathPointFlash();
 
@@ -3373,6 +3399,8 @@ bool PathTimerHasRecordedPath()
         string line = lines[i];
         if (LooksLikeRuntimeLine(line))
             continue;
+        if (IsPathMetadataRecord(line))
+            continue;
         if (!string.IsNullOrWhiteSpace(line))
             return true;
     }
@@ -3395,6 +3423,273 @@ bool RewritePathTimerLines(List<string> lines)
     }
     timer.CustomData = sb.ToString();
     return true;
+}
+
+bool IsMineAreaSkipMetaLine(string line)
+{
+    if (string.IsNullOrWhiteSpace(line))
+        return false;
+    string trimmed = line.Trim();
+    return trimmed.StartsWith(mineAreaSkipMetaPrefix, StringComparison.OrdinalIgnoreCase) ||
+           trimmed.StartsWith(mineAreaSkipMetaLegacyEncodedPrefix, StringComparison.OrdinalIgnoreCase) ||
+           trimmed.StartsWith(mineAreaSkipMetaLegacyPrefix, StringComparison.OrdinalIgnoreCase);
+}
+
+bool IsPathMetadataRecord(string line)
+{
+    return IsMineAreaSkipMetaLine(line);
+}
+
+bool LaneListContains(List<int> lanes, int laneIndex)
+{
+    for (int i = 0; i < lanes.Count; i++)
+        if (lanes[i] == laneIndex)
+            return true;
+    return false;
+}
+
+void AddLaneIndexUnique(List<int> lanes, int laneIndex)
+{
+    if (laneIndex < 0 || LaneListContains(lanes, laneIndex))
+        return;
+    lanes.Add(laneIndex);
+}
+
+void SortLaneIndexes(List<int> lanes)
+{
+    lanes.Sort();
+}
+
+string FormatMineAreaSkipMetaLine(double mineHeight, double mineWidth, int laneCount, List<int> skipLanes)
+{
+    SortLaneIndexes(skipLanes);
+    StringBuilder sb = new StringBuilder();
+    sb.Append("h=");
+    sb.Append(mineHeight.ToString("0.00"));
+    sb.Append(";w=");
+    sb.Append(mineWidth.ToString("0.00"));
+    sb.Append(";count=");
+    sb.Append(laneCount);
+    sb.Append(";skip=");
+    for (int i = 0; i < skipLanes.Count; i++)
+    {
+        if (i > 0)
+            sb.Append(",");
+        sb.Append(skipLanes[i] + 1);
+    }
+    return mineAreaSkipMetaPrefix + EncodeMineAreaSkipMetaPayload(sb.ToString());
+}
+
+string EncodeMineAreaSkipMetaPayload(string payload)
+{
+    if (string.IsNullOrEmpty(payload))
+        return "";
+
+    StringBuilder sb = new StringBuilder(payload.Length * 4);
+    for (int i = 0; i < payload.Length; i++)
+    {
+        if (i > 0)
+            sb.Append(";");
+        int key = mineAreaSkipMetaKey[i % mineAreaSkipMetaKey.Length];
+        int encoded = ((int)payload[i]) ^ key;
+        sb.Append(encoded.ToString("000"));
+    }
+    return sb.ToString();
+}
+
+bool TryDecodeMineAreaSkipMetaPayload(string encoded, out string payload)
+{
+    payload = "";
+    if (string.IsNullOrWhiteSpace(encoded))
+        return false;
+
+    string[] parts = encoded.Split(';');
+    StringBuilder sb = new StringBuilder(parts.Length);
+    for (int i = 0; i < parts.Length; i++)
+    {
+        int value;
+        if (!int.TryParse(parts[i].Trim(), out value))
+            return false;
+        int key = mineAreaSkipMetaKey[i % mineAreaSkipMetaKey.Length];
+        sb.Append((char)(value ^ key));
+    }
+    payload = sb.ToString();
+    return true;
+}
+
+bool TryDecodeLegacyMineAreaSkipMetaPayload(string encoded, out string payload)
+{
+    payload = "";
+    if (string.IsNullOrWhiteSpace(encoded) || (encoded.Length % 2) != 0)
+        return false;
+
+    StringBuilder sb = new StringBuilder(encoded.Length / 2);
+    for (int i = 0; i < encoded.Length; i += 2)
+    {
+        int value;
+        if (!int.TryParse(encoded.Substring(i, 2), System.Globalization.NumberStyles.HexNumber, null, out value))
+            return false;
+        int key = mineAreaSkipMetaKey[(i / 2) % mineAreaSkipMetaKey.Length];
+        sb.Append((char)(value ^ key));
+    }
+    payload = sb.ToString();
+    return true;
+}
+
+bool TryParseMineAreaSkipMetaLine(string line, out double mineHeight, out double mineWidth, out int laneCount, List<int> skipLanes)
+{
+    mineHeight = 0;
+    mineWidth = 0;
+    laneCount = 0;
+    skipLanes.Clear();
+
+    if (!IsMineAreaSkipMetaLine(line))
+        return false;
+
+    string trimmed = line.Trim();
+    string payload;
+    if (trimmed.StartsWith(mineAreaSkipMetaPrefix, StringComparison.OrdinalIgnoreCase))
+    {
+        if (!TryDecodeMineAreaSkipMetaPayload(trimmed.Substring(mineAreaSkipMetaPrefix.Length), out payload))
+            return false;
+    }
+    else if (trimmed.StartsWith(mineAreaSkipMetaLegacyEncodedPrefix, StringComparison.OrdinalIgnoreCase))
+    {
+        if (!TryDecodeLegacyMineAreaSkipMetaPayload(trimmed.Substring(mineAreaSkipMetaLegacyEncodedPrefix.Length), out payload))
+            return false;
+    }
+    else
+    {
+        payload = trimmed.Substring(mineAreaSkipMetaLegacyPrefix.Length);
+    }
+
+    string[] parts = payload.Split(';');
+    for (int i = 0; i < parts.Length; i++)
+    {
+        string part = parts[i].Trim();
+        int eq = part.IndexOf('=');
+        if (eq <= 0)
+            continue;
+        string key = part.Substring(0, eq).Trim();
+        string value = part.Substring(eq + 1).Trim();
+        if (key.Equals("h", StringComparison.OrdinalIgnoreCase))
+            double.TryParse(value, out mineHeight);
+        else if (key.Equals("w", StringComparison.OrdinalIgnoreCase))
+            double.TryParse(value, out mineWidth);
+        else if (key.Equals("count", StringComparison.OrdinalIgnoreCase))
+            int.TryParse(value, out laneCount);
+        else if (key.Equals("skip", StringComparison.OrdinalIgnoreCase))
+        {
+            string[] laneParts = value.Split(',');
+            for (int l = 0; l < laneParts.Length; l++)
+            {
+                int oneBasedLane;
+                if (int.TryParse(laneParts[l].Trim(), out oneBasedLane) && oneBasedLane > 0)
+                    AddLaneIndexUnique(skipLanes, oneBasedLane - 1);
+            }
+        }
+    }
+
+    SortLaneIndexes(skipLanes);
+    return mineHeight > 0 && mineWidth > 0 && laneCount > 0;
+}
+
+bool MineAreaSkipMetaMatches(double mineHeight, double mineWidth, int laneCount)
+{
+    return Math.Abs(mineHeight - MINEH) < 0.01 &&
+           Math.Abs(mineWidth - MINEW) < 0.01 &&
+           laneCount == areaLaneCount;
+}
+
+bool FindMineAreaRecordLineIndex(List<string> lines, int recordIndexToFind, out int lineIndex)
+{
+    lineIndex = -1;
+    Vector3D ap, af, au;
+    int anchorIndex;
+    TryFindPathAnchor(lines, out anchorIndex, out ap, out af, out au);
+    int recordIndex = -1;
+    for (int i = 0; i < lines.Count; i++)
+    {
+        if (i == anchorIndex || LooksLikeRuntimeLine(lines[i]))
+            continue;
+        recordIndex++;
+        if (recordIndex == recordIndexToFind)
+        {
+            lineIndex = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+int FindPathTimerRecordIndexByLine(string targetLine)
+{
+    if (string.IsNullOrWhiteSpace(targetLine))
+        return -1;
+
+    List<string> lines;
+    string timerName;
+    if (!TryReadPathTimerLines(out lines, out timerName))
+        return -1;
+
+    Vector3D ap, af, au;
+    int anchorIndex;
+    TryFindPathAnchor(lines, out anchorIndex, out ap, out af, out au);
+    int recordIndex = -1;
+    int foundIndex = -1;
+    for (int i = 0; i < lines.Count; i++)
+    {
+        if (i == anchorIndex || LooksLikeRuntimeLine(lines[i]))
+            continue;
+        recordIndex++;
+        if (string.Equals(lines[i].Trim(), targetLine.Trim(), StringComparison.OrdinalIgnoreCase))
+            foundIndex = recordIndex;
+    }
+    return foundIndex;
+}
+
+bool UpsertMineAreaSkipMetaRecord(int mineAreaRecordIndex, string metaLine)
+{
+    List<string> lines;
+    string timerName;
+    if (!TryReadPathTimerLines(out lines, out timerName))
+        return false;
+
+    int mineAreaLineIndex;
+    if (!FindMineAreaRecordLineIndex(lines, mineAreaRecordIndex, out mineAreaLineIndex))
+        return false;
+
+    int metaIndex = mineAreaLineIndex + 1;
+    if (metaIndex < lines.Count && IsMineAreaSkipMetaLine(lines[metaIndex]))
+        lines[metaIndex] = metaLine;
+    else
+        lines.Insert(metaIndex, metaLine);
+
+    bool ok = RewritePathTimerLines(lines);
+    if (ok)
+        RecountPathTimerRecords(lines);
+    return ok;
+}
+
+void UpsertActiveMineAreaSkipMetaRecord()
+{
+    if (activeMineAreaRecordIndex < 0)
+        return;
+
+    List<int> merged = new List<int>();
+    for (int i = 0; i < areaSkipLaneIndexes.Count; i++)
+        AddLaneIndexUnique(merged, areaSkipLaneIndexes[i]);
+    for (int i = 0; i < areaEmptyLaneIndexes.Count; i++)
+        AddLaneIndexUnique(merged, areaEmptyLaneIndexes[i]);
+
+    string metaLine = FormatMineAreaSkipMetaLine(MINEH, MINEW, areaLaneCount, merged);
+    if (UpsertMineAreaSkipMetaRecord(activeMineAreaRecordIndex, metaLine))
+    {
+        if (activeMineAreaRecordIndex + 1 < pathRecords.Count && IsMineAreaSkipMetaLine(pathRecords[activeMineAreaRecordIndex + 1]))
+            pathRecords[activeMineAreaRecordIndex + 1] = metaLine;
+        else if (activeMineAreaRecordIndex + 1 <= pathRecords.Count)
+            pathRecords.Insert(activeMineAreaRecordIndex + 1, metaLine);
+    }
 }
 
 bool TryFindPathAnchor(List<string> lines, out int anchorIndex, out Vector3D anchorPos, out Vector3D anchorForward, out Vector3D anchorUp)
@@ -3682,9 +3977,12 @@ void StopPathExecution()
     areaLaneIndex = 0;
     areaLaneCount = 0;
     areaPlanValid = false;
+    ClearAreaLaneSkipState();
     retryCurrentLane = false;
     finishAreaAfterBackout = false;
     returnToMinePoseAfterArea = false;
+    activeMineAreaRecordIndex = -1;
+    activeMineAreaRecordLine = "";
     stuckRetryCount = 0;
     stuckBackout = false;
     SetDrills(false);
@@ -4112,6 +4410,8 @@ void SetAdjustedMineAreaCorner()
     laneDepth = pathRecordMineDepth;
     mineAreaAdjustStage = MineAreaAdjustStage.ReturnToMinePoseAfterSet;
     RewriteCurrentMineAreaRecord(false);
+    ClearAreaLaneSkipState();
+    UpsertActiveMineAreaSkipMetaRecord();
     targetPosition = areaMineEntryPos;
     desiredUp = areaPlanUp;
     desiredForward = areaPlanForward;
@@ -4343,6 +4643,8 @@ void AddRecallRecordIfRunnable(string rawRecord, int displayDone)
 {
     string record = NormalizePathRecord(rawRecord);
     if (string.IsNullOrWhiteSpace(record))
+        return;
+    if (IsPathMetadataRecord(record))
         return;
     if (LineLooksLikeMineArea(record) && pathAnchorValid)
     {
@@ -4717,7 +5019,7 @@ bool ResumeAutoServiceMineArea()
         if (!TryStartAreaMiningCommandFromLane(record, startLane))
             return false;
         RestoreAutoServiceMineEntry();
-        return miningEnabled;
+        return miningEnabled || autopilotEnabled;
     }
 
     if (!pathAnchorValid || !LineLooksLikeMineArea(record))
@@ -4731,7 +5033,7 @@ bool ResumeAutoServiceMineArea()
 
     StartAreaMiningWithCornersFromLane(cornerA, cornerB, areaUp, areaForward, depth, startLane);
     RestoreAutoServiceMineEntry();
-    return miningEnabled;
+    return miningEnabled || autopilotEnabled;
 }
 
 void RestoreAutoServiceMineEntry()
@@ -5475,6 +5777,8 @@ void StartNextPathRecord()
     {
         string record = pathRecords[pathIndex];
         pathIndex++;
+        if (IsPathMetadataRecord(record))
+            continue;
         if (ExecutePathRecord(record))
         {
             StartPathRunTimer();
@@ -5601,13 +5905,15 @@ bool ExecutePathRecord(string rawRecord)
         record = record.Substring(1, record.Length - 2).Trim();
     if (string.IsNullOrWhiteSpace(record))
         return false;
+    if (IsPathMetadataRecord(record))
+        return false;
 
     if (record.StartsWith("minearea;", StringComparison.OrdinalIgnoreCase))
     {
         activeMineAreaRecordIndex = Math.Max(0, pathIndex - 1);
         activeMineAreaRecordLine = record;
         StartAreaMining(record);
-        return miningEnabled;
+        return miningEnabled || autopilotEnabled;
     }
     if (record.Equals("dock", StringComparison.OrdinalIgnoreCase))
     {
@@ -5677,7 +5983,7 @@ bool ExecutePathRecord(string rawRecord)
         activeMineAreaRecordIndex = Math.Max(0, pathIndex - 1);
         activeMineAreaRecordLine = record;
         StartAreaMiningWithCorners(cornerA, cornerB, areaUp, areaForward, depth);
-        return miningEnabled;
+        return miningEnabled || autopilotEnabled;
     }
 
     Vector3D pos, fwd, upN;
@@ -5762,6 +6068,7 @@ void StartSingleLaneMining(string command)
     areaLaneIndex = 0;
     areaLaneCount = 0;
     areaPlanValid = false;
+    ClearAreaLaneSkipState();
     retryCurrentLane = false;
     stuckRetryCount = 0;
 
@@ -5827,12 +6134,72 @@ bool TryStartAreaMiningCommandFromLane(string command, int startLane)
     }
 
     StartAreaMiningWithCornersFromLane(leftUpper, rightBottom, up, forward, depth, startLane);
-    return miningEnabled;
+    return miningEnabled || autopilotEnabled;
 }
 
 void StartAreaMiningWithCorners(Vector3D cornerA, Vector3D cornerB, Vector3D up, Vector3D forward, double depth)
 {
     StartAreaMiningWithCornersFromLane(cornerA, cornerB, up, forward, depth, 0);
+}
+
+void ClearAreaLaneSkipState()
+{
+    areaSkipLaneIndexes.Clear();
+    areaEmptyLaneIndexes.Clear();
+    areaCurrentLaneSawOre = false;
+    suppressCurrentLaneEmptyRecord = false;
+}
+
+void LoadActiveMineAreaSkipMetadata()
+{
+    ClearAreaLaneSkipState();
+    if (activeMineAreaRecordIndex < 0 || activeMineAreaRecordIndex + 1 >= pathRecords.Count)
+        return;
+
+    double savedHeight, savedWidth;
+    int savedLaneCount;
+    List<int> parsedSkipLanes = new List<int>();
+    if (!TryParseMineAreaSkipMetaLine(pathRecords[activeMineAreaRecordIndex + 1],
+                                      out savedHeight, out savedWidth, out savedLaneCount, parsedSkipLanes))
+        return;
+    if (!MineAreaSkipMetaMatches(savedHeight, savedWidth, savedLaneCount))
+        return;
+
+    for (int i = 0; i < parsedSkipLanes.Count; i++)
+        if (parsedSkipLanes[i] >= 0 && parsedSkipLanes[i] < areaLaneCount)
+            AddLaneIndexUnique(areaSkipLaneIndexes, parsedSkipLanes[i]);
+}
+
+bool AdvancePastSkippedAreaLanes()
+{
+    int firstSkipped = areaLaneIndex;
+    while (areaLaneIndex < areaLaneCount && LaneListContains(areaSkipLaneIndexes, areaLaneIndex))
+        areaLaneIndex++;
+
+    if (areaLaneIndex > firstSkipped)
+        Echo($"Skipping saved empty lanes {firstSkipped + 1}-{areaLaneIndex}.");
+
+    return areaLaneIndex < areaLaneCount;
+}
+
+void ResetCurrentAreaLaneOreTracking()
+{
+    areaCurrentLaneSawOre = false;
+    suppressCurrentLaneEmptyRecord = false;
+}
+
+void RecordCurrentAreaLaneIfEmpty()
+{
+    if (!areaMiningMode || depthMode == DepthMode.Default)
+        return;
+    if (suppressCurrentLaneEmptyRecord || areaCurrentLaneSawOre || stuckRetryCount > 0)
+        return;
+    if (areaLaneIndex < 0 || areaLaneIndex >= areaLaneCount)
+        return;
+    if (LaneListContains(areaSkipLaneIndexes, areaLaneIndex))
+        return;
+
+    AddLaneIndexUnique(areaEmptyLaneIndexes, areaLaneIndex);
 }
 
 void StartAreaMiningWithCornersFromLane(Vector3D cornerA, Vector3D cornerB, Vector3D up, Vector3D forward, double depth, int startLane)
@@ -5870,6 +6237,18 @@ void StartAreaMiningWithCornersFromLane(Vector3D cornerA, Vector3D cornerB, Vect
     retryCurrentLane = false;
     finishAreaAfterBackout = false;
     stuckRetryCount = 0;
+    LoadActiveMineAreaSkipMetadata();
+    if (!AdvancePastSkippedAreaLanes())
+    {
+        miningEnabled = false;
+        miningState = MiningState.Idle;
+        TriggerPathPointFlash();
+        OpenMinerMenu(MiLcdMenu.MineArea);
+        miMenuIndex = 1;
+        Echo("Area mining skipped; all lanes are marked empty.");
+        FinishAreaMining();
+        return;
+    }
     laneAnchor = GetAreaLaneAnchor(areaLaneIndex);
     targetPosition = laneAnchor;
     activeMaxSpeed = SPEEDB;
@@ -5879,6 +6258,7 @@ void StartAreaMiningWithCornersFromLane(Vector3D cornerA, Vector3D cornerB, Vect
     miningState = MiningState.EnterLane;
     _invCached = false; // refresh inventory block list for ore tracking
     fullStateDirty = true;
+    ResetCurrentAreaLaneOreTracking();
     ResetDepthAutoTracker();
     TriggerPathPointFlash();
     OpenMinerMenu(MiLcdMenu.MineArea);
@@ -6264,7 +6644,13 @@ void UpdateMiningState()
                         Echo($"Max retries ({maxStuckRetries}) reached. Skipping lane {areaLaneIndex + 1}.");
                         stuckRetryCount = 0;
                         areaLaneIndex++;
+                        if (!AdvancePastSkippedAreaLanes())
+                        {
+                            FinishAreaMining();
+                            return;
+                        }
                         laneAnchor = GetAreaLaneAnchor(areaLaneIndex);
+                        ResetCurrentAreaLaneOreTracking();
                         ResetDepthAutoTracker();
                         miningState = MiningState.EnterLane;
                     }
@@ -6281,6 +6667,7 @@ void UpdateMiningState()
                         areaLaneIndex = 0;
                         areaLaneCount = 0;
                         areaPlanValid = false;
+                        ClearAreaLaneSkipState();
                     }
                     else
                     {
@@ -6298,15 +6685,23 @@ void UpdateMiningState()
                 }
                 else if (areaMiningMode && areaLaneIndex + 1 < areaLaneCount)
                 {
+                    RecordCurrentAreaLaneIfEmpty();
                     stuckRetryCount = 0;
                     areaLaneIndex++;
+                    if (!AdvancePastSkippedAreaLanes())
+                    {
+                        FinishAreaMining();
+                        return;
+                    }
                     laneAnchor = GetAreaLaneAnchor(areaLaneIndex);
+                    ResetCurrentAreaLaneOreTracking();
                     ResetDepthAutoTracker();
                     miningState = MiningState.EnterLane;
                     Echo($"Proceeding to lane {areaLaneIndex + 1}/{areaLaneCount}");
                 }
                 else
                 {
+                    RecordCurrentAreaLaneIfEmpty();
                     FinishAreaMining();
                 }
             }
@@ -6373,6 +6768,8 @@ bool ShouldFinishDrillForward()
         lastOreSnapshot = oreNow;
         lastOreGainDepth = depthProgress;
         noOreGainTicks = 0;
+        if (areaMiningMode)
+            areaCurrentLaneSawOre = true;
     }
     else if (depthProgress >= laneDepth && (depthProgress - lastOreGainDepth) >= autoDepthNoGainMeters)
     {
@@ -6499,6 +6896,9 @@ bool CheckStuckInLane()
 void FinishAreaMining()
 {
     ClearPathRecordMineBoundaryLock();
+    UpsertActiveMineAreaSkipMetaRecord();
+    activeMineAreaRecordIndex = -1;
+    activeMineAreaRecordLine = "";
     SetDrills(false);
     miningEnabled = false;
     miningState = MiningState.Idle;
@@ -6507,6 +6907,7 @@ void FinishAreaMining()
     areaLaneIndex = 0;
     areaLaneCount = 0;
     areaPlanValid = false;
+    ClearAreaLaneSkipState();
     finishAreaAfterBackout = false;
     if (returnToMinePoseAfterArea)
     {
@@ -6585,17 +6986,25 @@ void NextHole(bool skipToLast = false)
 
     if (miningState == MiningState.DrillForward)
     {
+        suppressCurrentLaneEmptyRecord = true;
         miningState = MiningState.Backout;
         Echo($"Backing out before advancing to hole {areaLaneIndex + 2}/{areaLaneCount}...");
     }
     else
     {
         areaLaneIndex = targetIndex;
+        if (!AdvancePastSkippedAreaLanes())
+        {
+            FinishAreaMining();
+            return;
+        }
         laneAnchor = GetAreaLaneAnchor(areaLaneIndex);
         targetPosition = laneAnchor;
         desiredForward = drillAxis.LengthSquared() > 0.001 ? drillAxis : rc.WorldMatrix.Forward;
         activeMaxSpeed = SPEEDB;
         hasTarget = true;
+        ResetCurrentAreaLaneOreTracking();
+        ResetDepthAutoTracker();
         miningState = MiningState.EnterLane;
         Echo($"Advancing to hole {areaLaneIndex + 1}/{areaLaneCount}");
     }
