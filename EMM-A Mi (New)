@@ -4192,7 +4192,24 @@ void ConfirmCurrentExcavationZoneAdjustment()
     {
         ReleasePathRecordMineConfirmHold();
         if (!RewriteCurrentMineAreaRecord(false))
+        {
             Echo("Excavation Zone confirm warning: could not rewrite path timer.");
+            return;
+        }
+        if (mineAreaAdjustmentDirty && areaPlanValid)
+        {
+            pathRecordMineConfirmPending = false;
+            mineAreaAdjustmentDirty = false;
+            pathRecordingPaused = true;
+            resumePathRecordingAfterMineArea = true;
+            pathRecordMinePreviewActive = true;
+            pathRecordMineCornerA = areaPlanCornerA;
+            pathRecordMineCornerB = areaPlanCornerB;
+            pathRecordMineEntry = GetInferredMineAreaEntryPose(areaPlanCornerA, areaPlanCornerB);
+            StartAreaMiningWithCorners(areaPlanCornerA, areaPlanCornerB, areaPlanUp, areaPlanForward, pathRecordMineDepth);
+            Echo("Started adjusted Excavation Zone preview.");
+            return;
+        }
         ConfirmRecordedExcavationZone();
         return;
     }
