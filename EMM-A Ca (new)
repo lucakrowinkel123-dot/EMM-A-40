@@ -76,7 +76,8 @@ string carrierOreCargoTag = "EMM-A Ca Cargo Container";
 string carrierStatusTag  = "EMM_A_CARRIER_STATUS";
 string minerProgressTag  = "EMM_A_MINER_PROGRESS";
 string minerCommandTag   = "EMM_A_MINER_COMMAND";
-string asteroidHeaderLine = "------------------------------------------------------------------------------------------------";
+string asteroidHeaderLine = "----- ----- ----- ----- ----- -----";
+string asteroidLegacyHeaderLine = "------------------------------------------------------------------------------------------------";
 double goToLeadDistanceMeters = 1250;
 double goToBubbleOffsetMeters = 150;
 double goToBubbleRadiusMeters = 1000;
@@ -4839,11 +4840,12 @@ bool TryFindAsteroidRecordRange(int asteroidNum, out IMyTimerBlock dbTimer, out 
         int searchFrom = 0;
         while (true)
         {
-            int recordStart = candidateText.IndexOf(asteroidHeaderLine, searchFrom, StringComparison.Ordinal);
+            int headerLength;
+            int recordStart = FindNextAsteroidHeader(candidateText, searchFrom, out headerLength);
             if (recordStart < 0)
                 break;
 
-            int lineStart = recordStart + asteroidHeaderLine.Length;
+            int lineStart = recordStart + headerLength;
             while (lineStart < candidateText.Length && (candidateText[lineStart] == '\n' || candidateText[lineStart] == '\r'))
                 lineStart++;
             int lineEnd = candidateText.IndexOfAny(new char[] { '\n', '\r' }, lineStart);
@@ -4852,7 +4854,8 @@ bool TryFindAsteroidRecordRange(int asteroidNum, out IMyTimerBlock dbTimer, out 
 
             int existingNum;
             string labelLine = candidateText.Substring(lineStart, lineEnd - lineStart).Trim();
-            int nextStart = candidateText.IndexOf(asteroidHeaderLine, lineEnd, StringComparison.Ordinal);
+            int nextHeaderLength;
+            int nextStart = FindNextAsteroidHeader(candidateText, lineEnd, out nextHeaderLength);
             int recordEnd = nextStart < 0 ? candidateText.Length : nextStart;
             if (TryParseAsteroidDbLabel(labelLine, out existingNum) && existingNum == asteroidNum)
             {
@@ -4867,6 +4870,30 @@ bool TryFindAsteroidRecordRange(int asteroidNum, out IMyTimerBlock dbTimer, out 
         }
     }
     return false;
+}
+
+int FindNextAsteroidHeader(string text, int searchFrom, out int headerLength)
+{
+    int current = text.IndexOf(asteroidHeaderLine, searchFrom, StringComparison.Ordinal);
+    int legacy = text.IndexOf(asteroidLegacyHeaderLine, searchFrom, StringComparison.Ordinal);
+    if (current < 0 && legacy < 0)
+    {
+        headerLength = 0;
+        return -1;
+    }
+    if (legacy < 0 || (current >= 0 && current < legacy))
+    {
+        headerLength = asteroidHeaderLine.Length;
+        return current;
+    }
+
+    headerLength = asteroidLegacyHeaderLine.Length;
+    return legacy;
+}
+
+bool IsAsteroidHeaderLine(string line)
+{
+    return line == asteroidHeaderLine || line == asteroidLegacyHeaderLine;
 }
 
 string RemoveTextRange(string text, int start, int end)
@@ -4895,11 +4922,12 @@ string InsertAsteroidRecordOrdered(string existingText, int asteroidNum, string 
     int searchFrom = 0;
     while (true)
     {
-        int sepIdx = existing.IndexOf(asteroidHeaderLine, searchFrom, StringComparison.Ordinal);
+        int headerLength;
+        int sepIdx = FindNextAsteroidHeader(existing, searchFrom, out headerLength);
         if (sepIdx < 0)
             break;
 
-        int pos = sepIdx + asteroidHeaderLine.Length;
+        int pos = sepIdx + headerLength;
         while (pos < existing.Length && (existing[pos] == '\n' || existing[pos] == '\r'))
             pos++;
         int lineEnd = existing.IndexOfAny(new char[] { '\n', '\r' }, pos);
@@ -4918,7 +4946,7 @@ string InsertAsteroidRecordOrdered(string existingText, int asteroidNum, string 
                 return NormalizeDbText(before + record + "\n" + existing.Substring(sepIdx));
             }
         }
-        searchFrom = sepIdx + 1;
+        searchFrom = sepIdx + headerLength;
     }
 
     return NormalizeDbText(existing + "\n" + record);
@@ -5825,7 +5853,7 @@ List<string> ExtractAsteroidPathLines(string dbContent, int asteroidNum)
         }
         else
         {
-            if (line == asteroidHeaderLine)
+            if (IsAsteroidHeaderLine(line))
                 break; // start of next asteroid record
             result.Add(DecodeAsteroidDbPathLine(line));
         }

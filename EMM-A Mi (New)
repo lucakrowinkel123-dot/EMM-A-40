@@ -2023,6 +2023,12 @@ Vector3D GetTargetOffsetWorld(MatrixD wm)
     return wm.Right * TOFFR + wm.Up * TOFFU + wm.Forward * TOFFF;
 }
 
+Vector3D GetTargetControlPointPosition()
+{
+    MatrixD wm = rc.WorldMatrix;
+    return rc.GetPosition() + GetTargetOffsetWorld(wm);
+}
+
 Vector3D GetDockConnectorOffsetWorld()
 {
     return GetDockConnectorOffsetWorld(_tickRcMatrix);
@@ -3052,7 +3058,7 @@ void HandlePathRecordMineStep()
 
     if (pathRecordMineStage == PathRecordMineStage.Idle)
     {
-        pathRecordMineEntry = rc.GetPosition();
+        pathRecordMineEntry = GetTargetControlPointPosition();
         pathRecordMineCornerA = pathRecordMineEntry;
         pathRecordMineCornerB = Vector3D.Zero;
         // Live recording (soft-lock, return-to-entry, auto-mine) uses the miner's own
@@ -3070,7 +3076,7 @@ void HandlePathRecordMineStep()
 
     if (pathRecordMineStage == PathRecordMineStage.EntryCaptured)
     {
-        pathRecordMineCornerA = rc.GetPosition();
+        pathRecordMineCornerA = GetTargetControlPointPosition();
         pathRecordMineStage = PathRecordMineStage.CornerCaptured;
         TriggerPathPointFlash();
         Echo("Corner A saved. Move freely to Corner B.");
@@ -3083,7 +3089,7 @@ void HandlePathRecordMineStep()
         return;
     }
 
-    Vector3D cornerB = rc.GetPosition();
+    Vector3D cornerB = GetTargetControlPointPosition();
     pathRecordMineCornerB = cornerB;
     ProjectMineAreaToShallowPlane(ref pathRecordMineCornerA, ref pathRecordMineCornerB, pathRecordMineForward);
     pathRecordMineEntry = GetInferredMineAreaEntryPose(pathRecordMineCornerA, pathRecordMineCornerB);
@@ -4087,9 +4093,9 @@ void SetAdjustedMineAreaCorner()
     }
 
     if (mineAreaAdjustCornerA)
-        areaPlanCornerA = rc.GetPosition();
+        areaPlanCornerA = GetTargetControlPointPosition();
     else
-        areaPlanCornerB = rc.GetPosition();
+        areaPlanCornerB = GetTargetControlPointPosition();
 
     ProjectMineAreaToShallowPlane(ref areaPlanCornerA, ref areaPlanCornerB, areaPlanForward);
     areaMineEntryPos = GetInferredMineAreaEntryPose(areaPlanCornerA, areaPlanCornerB);
@@ -5854,7 +5860,7 @@ void StartAreaMiningWithCornersFromLane(Vector3D cornerA, Vector3D cornerB, Vect
     areaPlanUp = up;
     areaPlanForward = forward;
     areaPlanRight = right;
-    areaMineEntryPos = rc.GetPosition();
+    areaMineEntryPos = GetTargetControlPointPosition();
     areaMineEntryForward = Vector3D.Normalize(rc.WorldMatrix.Forward);
     areaMineEntryUp = Vector3D.Normalize(rc.WorldMatrix.Up);
     returnToMinePoseAfterArea = true;
