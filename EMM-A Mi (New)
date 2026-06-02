@@ -1664,8 +1664,11 @@ double GetRecordAreaWidthMultiple()
 {
     if (pathRecordMineStage != PathRecordMineStage.CornerCaptured)
         return 0;
+    Vector3D cornerA = pathRecordMineCornerA;
+    Vector3D cornerB = GetTargetControlPointPosition();
+    ResolveMineAreaCornersFromControlPoints(ref cornerA, ref cornerB, pathRecordMineForward, pathRecordMineUp);
     Vector3D right = Vector3D.Normalize(Vector3D.Cross(pathRecordMineForward, pathRecordMineUp));
-    Vector3D delta = _tickRcPosition - pathRecordMineCornerA;
+    Vector3D delta = cornerB - cornerA;
     return Math.Abs(Vector3D.Dot(delta, right)) / Math.Max(0.1, MINEW);
 }
 
@@ -1673,8 +1676,11 @@ double GetRecordAreaHeightMultiple()
 {
     if (pathRecordMineStage != PathRecordMineStage.CornerCaptured)
         return 0;
+    Vector3D cornerA = pathRecordMineCornerA;
+    Vector3D cornerB = GetTargetControlPointPosition();
+    ResolveMineAreaCornersFromControlPoints(ref cornerA, ref cornerB, pathRecordMineForward, pathRecordMineUp);
     Vector3D down = -Vector3D.Normalize(pathRecordMineUp);
-    Vector3D delta = _tickRcPosition - pathRecordMineCornerA;
+    Vector3D delta = cornerB - cornerA;
     return Math.Abs(Vector3D.Dot(delta, down)) / Math.Max(0.1, MINEH);
 }
 
@@ -1710,18 +1716,36 @@ double GetAdjustAreaWidthMultiple()
 {
     if (!areaPlanValid)
         return GetRecordAreaWidthMultiple();
-    Vector3D corner = mineAreaAdjustStage == MineAreaAdjustStage.Editing ? _tickRcPosition : (mineAreaAdjustCornerA ? areaPlanCornerA : areaPlanCornerB);
-    Vector3D other = mineAreaAdjustCornerA ? areaPlanCornerB : areaPlanCornerA;
-    return Math.Abs(Vector3D.Dot(other - corner, areaPlanRight)) / Math.Max(0.1, MINEW);
+    Vector3D cornerA = areaPlanCornerA;
+    Vector3D cornerB = areaPlanCornerB;
+    if (mineAreaAdjustStage == MineAreaAdjustStage.Editing)
+    {
+        Vector3D controlPoint = GetTargetControlPointPosition();
+        if (mineAreaAdjustCornerA)
+            cornerA = GetMineAreaFootprintCornerFromControlPoint(controlPoint, cornerB, areaPlanForward, areaPlanUp);
+        else
+            cornerB = GetMineAreaFootprintCornerFromControlPoint(controlPoint, cornerA, areaPlanForward, areaPlanUp);
+        CanonicalizeMineAreaCorners(ref cornerA, ref cornerB, areaPlanForward, areaPlanUp);
+    }
+    return Math.Abs(Vector3D.Dot(cornerB - cornerA, areaPlanRight)) / Math.Max(0.1, MINEW);
 }
 
 double GetAdjustAreaHeightMultiple()
 {
     if (!areaPlanValid)
         return GetRecordAreaHeightMultiple();
-    Vector3D corner = mineAreaAdjustStage == MineAreaAdjustStage.Editing ? _tickRcPosition : (mineAreaAdjustCornerA ? areaPlanCornerA : areaPlanCornerB);
-    Vector3D other = mineAreaAdjustCornerA ? areaPlanCornerB : areaPlanCornerA;
-    return Math.Abs(Vector3D.Dot(other - corner, -areaPlanUp)) / Math.Max(0.1, MINEH);
+    Vector3D cornerA = areaPlanCornerA;
+    Vector3D cornerB = areaPlanCornerB;
+    if (mineAreaAdjustStage == MineAreaAdjustStage.Editing)
+    {
+        Vector3D controlPoint = GetTargetControlPointPosition();
+        if (mineAreaAdjustCornerA)
+            cornerA = GetMineAreaFootprintCornerFromControlPoint(controlPoint, cornerB, areaPlanForward, areaPlanUp);
+        else
+            cornerB = GetMineAreaFootprintCornerFromControlPoint(controlPoint, cornerA, areaPlanForward, areaPlanUp);
+        CanonicalizeMineAreaCorners(ref cornerA, ref cornerB, areaPlanForward, areaPlanUp);
+    }
+    return Math.Abs(Vector3D.Dot(cornerB - cornerA, -areaPlanUp)) / Math.Max(0.1, MINEH);
 }
 
 string GetLoadingSymbol()
@@ -3109,7 +3133,7 @@ void HandlePathRecordMineStep()
 
     Vector3D cornerB = GetTargetControlPointPosition();
     pathRecordMineCornerB = cornerB;
-    ProjectMineAreaToShallowPlane(ref pathRecordMineCornerA, ref pathRecordMineCornerB, pathRecordMineForward);
+    ResolveMineAreaCornersFromControlPoints(ref pathRecordMineCornerA, ref pathRecordMineCornerB, pathRecordMineForward, pathRecordMineUp);
     pathRecordMineEntry = GetInferredMineAreaEntryPose(pathRecordMineCornerA, pathRecordMineCornerB);
     ClearPathRecordMineBoundaryLock();
     pathRecordMineCounter++;
@@ -3158,6 +3182,115 @@ void ProjectMineAreaToShallowPlane(ref Vector3D cornerA, ref Vector3D cornerB, V
     double shallowDepth = Math.Min(depthA, depthB);
     cornerA -= fwd * (depthA - shallowDepth);
     cornerB -= fwd * (depthB - shallowDepth);
+}
+
+bool TryGetMineAreaBasis(Vector3D forward, Vector3D up, out Vector3D forwardN, out Vector3D upN, out Vector3D rightN, out Vector3D downN)
+{
+    forwardN = Vector3D.Zero;
+    upN = Vector3D.Zero;
+    rightN = Vector3D.Zero;
+    downN = Vector3D.Zero;
+
+    if (forward.LengthSquared() <= 0.001 || up.LengthSquared() <= 0.001)
+        return false;
+
+    forwardN = Vector3D.Normalize(forward);
+    upN = Vector3D.Normalize(up);
+    rightN = Vector3D.Cross(forwardN, upN);
+    if (rightN.LengthSquared() <= 0.001)
+        return false;
+
+    rightN = Vector3D.Normalize(rightN);
+    downN = -upN;
+    return true;
+}
+
+void ResolveMineAreaCornersFromControlPoints(ref Vector3D cornerA, ref Vector3D cornerB, Vector3D forward, Vector3D up)
+{
+    Vector3D forwardN, upN, right, down;
+    if (!TryGetMineAreaBasis(forward, up, out forwardN, out upN, out right, out down))
+    {
+        ProjectMineAreaToShallowPlane(ref cornerA, ref cornerB, forward);
+        return;
+    }
+
+    ProjectMineAreaToShallowPlane(ref cornerA, ref cornerB, forwardN);
+
+    double halfWidth = Math.Max(0, MINEW) * 0.5;
+    double halfHeight = Math.Max(0, MINEH) * 0.5;
+    double aRight = Vector3D.Dot(cornerA, right);
+    double bRight = Vector3D.Dot(cornerB, right);
+    double aDown = Vector3D.Dot(cornerA, down);
+    double bDown = Vector3D.Dot(cornerB, down);
+
+    double minRight = Math.Min(aRight, bRight) - halfWidth;
+    double maxRight = Math.Max(aRight, bRight) + halfWidth;
+    double minDown = Math.Min(aDown, bDown) - halfHeight;
+    double maxDown = Math.Max(aDown, bDown) + halfHeight;
+
+    Vector3D origin = cornerA +
+        right * (minRight - aRight) +
+        down * (minDown - aDown);
+    cornerA = origin;
+    cornerB = origin +
+        right * (maxRight - minRight) +
+        down * (maxDown - minDown);
+}
+
+Vector3D ProjectPointToMineAreaPlane(Vector3D point, Vector3D planePoint, Vector3D forward)
+{
+    if (forward.LengthSquared() <= 0.001)
+        return point;
+
+    Vector3D forwardN = Vector3D.Normalize(forward);
+    double pointDepth = Vector3D.Dot(point, forwardN);
+    double planeDepth = Vector3D.Dot(planePoint, forwardN);
+    return point - forwardN * (pointDepth - planeDepth);
+}
+
+Vector3D GetMineAreaFootprintCornerFromControlPoint(Vector3D controlPoint, Vector3D otherCorner, Vector3D forward, Vector3D up)
+{
+    Vector3D forwardN, upN, right, down;
+    if (!TryGetMineAreaBasis(forward, up, out forwardN, out upN, out right, out down))
+        return controlPoint;
+
+    controlPoint = ProjectPointToMineAreaPlane(controlPoint, otherCorner, forwardN);
+    Vector3D delta = controlPoint - otherCorner;
+    double signRight = Vector3D.Dot(delta, right) >= 0 ? 1 : -1;
+    double signDown = Vector3D.Dot(delta, down) >= 0 ? 1 : -1;
+    return controlPoint +
+        right * signRight * Math.Max(0, MINEW) * 0.5 +
+        down * signDown * Math.Max(0, MINEH) * 0.5;
+}
+
+void CanonicalizeMineAreaCorners(ref Vector3D cornerA, ref Vector3D cornerB, Vector3D forward, Vector3D up)
+{
+    Vector3D forwardN, upN, right, down;
+    if (!TryGetMineAreaBasis(forward, up, out forwardN, out upN, out right, out down))
+    {
+        ProjectMineAreaToShallowPlane(ref cornerA, ref cornerB, forward);
+        return;
+    }
+
+    ProjectMineAreaToShallowPlane(ref cornerA, ref cornerB, forwardN);
+
+    double aRight = Vector3D.Dot(cornerA, right);
+    double bRight = Vector3D.Dot(cornerB, right);
+    double aDown = Vector3D.Dot(cornerA, down);
+    double bDown = Vector3D.Dot(cornerB, down);
+
+    double minRight = Math.Min(aRight, bRight);
+    double maxRight = Math.Max(aRight, bRight);
+    double minDown = Math.Min(aDown, bDown);
+    double maxDown = Math.Max(aDown, bDown);
+
+    Vector3D origin = cornerA +
+        right * (minRight - aRight) +
+        down * (minDown - aDown);
+    cornerA = origin;
+    cornerB = origin +
+        right * (maxRight - minRight) +
+        down * (maxDown - minDown);
 }
 
 Vector3D GetInferredMineAreaEntryPose(Vector3D cornerA, Vector3D cornerB)
@@ -4297,6 +4430,8 @@ bool EnsureMineAreaAdjustmentPlanLoaded()
         return false;
     right = Vector3D.Normalize(right);
 
+    CanonicalizeMineAreaCorners(ref pathRecordMineCornerA, ref pathRecordMineCornerB, forward, up);
+
     if (!ConfigureAreaLanePlan(pathRecordMineCornerA, pathRecordMineCornerB, up, right, MINEH, MINEW))
         return false;
 
@@ -4407,12 +4542,13 @@ void SetAdjustedMineAreaCorner()
         return;
     }
 
+    Vector3D controlPoint = GetTargetControlPointPosition();
     if (mineAreaAdjustCornerA)
-        areaPlanCornerA = GetTargetControlPointPosition();
+        areaPlanCornerA = GetMineAreaFootprintCornerFromControlPoint(controlPoint, areaPlanCornerB, areaPlanForward, areaPlanUp);
     else
-        areaPlanCornerB = GetTargetControlPointPosition();
+        areaPlanCornerB = GetMineAreaFootprintCornerFromControlPoint(controlPoint, areaPlanCornerA, areaPlanForward, areaPlanUp);
 
-    ProjectMineAreaToShallowPlane(ref areaPlanCornerA, ref areaPlanCornerB, areaPlanForward);
+    CanonicalizeMineAreaCorners(ref areaPlanCornerA, ref areaPlanCornerB, areaPlanForward, areaPlanUp);
     areaMineEntryPos = GetInferredMineAreaEntryPose(areaPlanCornerA, areaPlanCornerB);
     Vector3D right = Vector3D.Cross(areaPlanForward, areaPlanUp);
     if (right.LengthSquared() > 0.001)
@@ -6222,6 +6358,7 @@ void RecordCurrentAreaLaneIfEmpty()
 void StartAreaMiningWithCornersFromLane(Vector3D cornerA, Vector3D cornerB, Vector3D up, Vector3D forward, double depth, int startLane)
 {
     ClearPathRecordMineBoundaryLock();
+    CanonicalizeMineAreaCorners(ref cornerA, ref cornerB, forward, up);
     Vector3D right = Vector3D.Cross(forward, up);
     if (right.LengthSquared() < 0.001)
         right = rc.WorldMatrix.Right;
