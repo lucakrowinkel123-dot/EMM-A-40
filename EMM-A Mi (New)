@@ -1369,8 +1369,8 @@ void AppendMinerRows(StringBuilder sb)
     {
         AppendMinerMenuRow(sb, "Set Corner B", 1, false);
         AppendMinerValueRow(sb, "Depth in meters", 2, miEditingValue && miEditingIndex == 1 ? miEditValue : pathRecordMineDepth, "", "0.0");
-        sb.AppendLine("   Height: " + GetRecordAreaHeightMultiple().ToString("0.0"));
-        sb.AppendLine("   Width: " + GetRecordAreaWidthMultiple().ToString("0.0"));
+        sb.AppendLine("   Height: " + FormatAreaSpanText(GetRecordAreaHeightMeters(), MINEH));
+        sb.AppendLine("   Width: " + FormatAreaSpanText(GetRecordAreaWidthMeters(), MINEW));
         AppendMinerMenuRow(sb, "Cancel Excavation Zone.", 3, false);
         return;
     }
@@ -1379,8 +1379,8 @@ void AppendMinerRows(StringBuilder sb)
     {
         AppendMinerMenuRow(sb, "Next hole", 1, false);
         AppendMinerMenuRow(sb, "Next hole all", 2, false);
-        sb.AppendLine("   Width: " + GetAreaWidthMeters().ToString("0.00") + " m (" + GetAreaWidthMultiple().ToString("0.0") + ")");
-        sb.AppendLine("   Height: " + GetAreaHeightMeters().ToString("0.00") + " m (" + GetAreaHeightMultiple().ToString("0.0") + ")");
+        sb.AppendLine("   Width: " + FormatAreaSpanText(GetAreaWidthMeters(), MINEW));
+        sb.AppendLine("   Height: " + FormatAreaSpanText(GetAreaHeightMeters(), MINEH));
         sb.AppendLine();
         AppendMinerMenuRow(sb, "Adjust Excavation Zone.", 3, false);
         return;
@@ -1446,8 +1446,8 @@ void AppendMinerRows(StringBuilder sb)
     {
         AppendMinerMenuRow(sb, "Set Corner " + (mineAreaAdjustCornerA ? "A" : "B"), 1, false);
         AppendMinerValueRow(sb, "Depth in meters", 2, miEditingValue && miEditingIndex == 1 ? miEditValue : pathRecordMineDepth, "", "0.0");
-        sb.AppendLine("   Height: " + GetAdjustAreaHeightMultiple().ToString("0.0"));
-        sb.AppendLine("   Width: " + GetAdjustAreaWidthMultiple().ToString("0.0"));
+        sb.AppendLine("   Height: " + FormatAreaSpanText(GetAdjustAreaHeightMeters(), MINEH));
+        sb.AppendLine("   Width: " + FormatAreaSpanText(GetAdjustAreaWidthMeters(), MINEW));
         return;
     }
 
@@ -1687,26 +1687,47 @@ int CountMinerLines(StringBuilder sb)
 
 double GetRecordAreaWidthMultiple()
 {
-    if (pathRecordMineStage != PathRecordMineStage.CornerCaptured)
-        return 0;
-    Vector3D cornerA = pathRecordMineCornerA;
-    Vector3D cornerB = GetTargetControlPointPosition();
-    ResolveMineAreaCornersFromControlPoints(ref cornerA, ref cornerB, pathRecordMineForward, pathRecordMineUp);
-    Vector3D right = Vector3D.Normalize(Vector3D.Cross(pathRecordMineForward, pathRecordMineUp));
-    Vector3D delta = cornerB - cornerA;
-    return Math.Abs(Vector3D.Dot(delta, right)) / Math.Max(0.1, MINEW);
+    return GetRecordAreaWidthMeters() / Math.Max(0.1, MINEW);
 }
 
 double GetRecordAreaHeightMultiple()
 {
+    return GetRecordAreaHeightMeters() / Math.Max(0.1, MINEH);
+}
+
+bool TryGetRecordAreaPreviewCorners(out Vector3D cornerA, out Vector3D cornerB)
+{
+    cornerA = Vector3D.Zero;
+    cornerB = Vector3D.Zero;
     if (pathRecordMineStage != PathRecordMineStage.CornerCaptured)
-        return 0;
-    Vector3D cornerA = pathRecordMineCornerA;
-    Vector3D cornerB = GetTargetControlPointPosition();
+        return false;
+    cornerA = pathRecordMineCornerA;
+    cornerB = GetTargetControlPointPosition();
     ResolveMineAreaCornersFromControlPoints(ref cornerA, ref cornerB, pathRecordMineForward, pathRecordMineUp);
+    return true;
+}
+
+double GetRecordAreaWidthMeters()
+{
+    Vector3D cornerA, cornerB;
+    if (!TryGetRecordAreaPreviewCorners(out cornerA, out cornerB))
+        return 0;
+    Vector3D right = Vector3D.Cross(pathRecordMineForward, pathRecordMineUp);
+    if (right.LengthSquared() <= 0.001)
+        return 0;
+    right = Vector3D.Normalize(right);
+    return Math.Abs(Vector3D.Dot(cornerB - cornerA, right));
+}
+
+double GetRecordAreaHeightMeters()
+{
+    Vector3D cornerA, cornerB;
+    if (!TryGetRecordAreaPreviewCorners(out cornerA, out cornerB))
+        return 0;
+    if (pathRecordMineUp.LengthSquared() <= 0.001)
+        return 0;
     Vector3D down = -Vector3D.Normalize(pathRecordMineUp);
-    Vector3D delta = cornerB - cornerA;
-    return Math.Abs(Vector3D.Dot(delta, down)) / Math.Max(0.1, MINEH);
+    return Math.Abs(Vector3D.Dot(cornerB - cornerA, down));
 }
 
 double GetAreaWidthMultiple()
@@ -1739,28 +1760,23 @@ double GetAreaHeightMeters()
 
 double GetAdjustAreaWidthMultiple()
 {
-    if (!areaPlanValid)
-        return GetRecordAreaWidthMultiple();
-    Vector3D cornerA = areaPlanCornerA;
-    Vector3D cornerB = areaPlanCornerB;
-    if (mineAreaAdjustStage == MineAreaAdjustStage.Editing)
-    {
-        Vector3D controlPoint = GetTargetControlPointPosition();
-        if (mineAreaAdjustCornerA)
-            cornerA = GetMineAreaFootprintCornerFromControlPoint(controlPoint, cornerB, areaPlanForward, areaPlanUp);
-        else
-            cornerB = GetMineAreaFootprintCornerFromControlPoint(controlPoint, cornerA, areaPlanForward, areaPlanUp);
-        CanonicalizeMineAreaCorners(ref cornerA, ref cornerB, areaPlanForward, areaPlanUp);
-    }
-    return Math.Abs(Vector3D.Dot(cornerB - cornerA, areaPlanRight)) / Math.Max(0.1, MINEW);
+    return GetAdjustAreaWidthMeters() / Math.Max(0.1, MINEW);
 }
 
 double GetAdjustAreaHeightMultiple()
 {
+    return GetAdjustAreaHeightMeters() / Math.Max(0.1, MINEH);
+}
+
+bool TryGetAdjustAreaPreviewCorners(out Vector3D cornerA, out Vector3D cornerB)
+{
+    cornerA = Vector3D.Zero;
+    cornerB = Vector3D.Zero;
     if (!areaPlanValid)
-        return GetRecordAreaHeightMultiple();
-    Vector3D cornerA = areaPlanCornerA;
-    Vector3D cornerB = areaPlanCornerB;
+        return TryGetRecordAreaPreviewCorners(out cornerA, out cornerB);
+
+    cornerA = areaPlanCornerA;
+    cornerB = areaPlanCornerB;
     if (mineAreaAdjustStage == MineAreaAdjustStage.Editing)
     {
         Vector3D controlPoint = GetTargetControlPointPosition();
@@ -1770,7 +1786,43 @@ double GetAdjustAreaHeightMultiple()
             cornerB = GetMineAreaFootprintCornerFromControlPoint(controlPoint, cornerA, areaPlanForward, areaPlanUp);
         CanonicalizeMineAreaCorners(ref cornerA, ref cornerB, areaPlanForward, areaPlanUp);
     }
-    return Math.Abs(Vector3D.Dot(cornerB - cornerA, -areaPlanUp)) / Math.Max(0.1, MINEH);
+    return true;
+}
+
+double GetAdjustAreaWidthMeters()
+{
+    if (!areaPlanValid)
+        return GetRecordAreaWidthMeters();
+    Vector3D cornerA = areaPlanCornerA;
+    Vector3D cornerB = areaPlanCornerB;
+    if (!TryGetAdjustAreaPreviewCorners(out cornerA, out cornerB))
+        return 0;
+    Vector3D right = areaPlanRight;
+    if (right.LengthSquared() <= 0.001 && areaPlanForward.LengthSquared() > 0.001 && areaPlanUp.LengthSquared() > 0.001)
+        right = Vector3D.Cross(areaPlanForward, areaPlanUp);
+    if (right.LengthSquared() <= 0.001)
+        return 0;
+    right = Vector3D.Normalize(right);
+    return Math.Abs(Vector3D.Dot(cornerB - cornerA, right));
+}
+
+double GetAdjustAreaHeightMeters()
+{
+    if (!areaPlanValid)
+        return GetRecordAreaHeightMeters();
+    Vector3D cornerA = areaPlanCornerA;
+    Vector3D cornerB = areaPlanCornerB;
+    if (!TryGetAdjustAreaPreviewCorners(out cornerA, out cornerB))
+        return 0;
+    if (areaPlanUp.LengthSquared() <= 0.001)
+        return 0;
+    return Math.Abs(Vector3D.Dot(cornerB - cornerA, -Vector3D.Normalize(areaPlanUp)));
+}
+
+string FormatAreaSpanText(double meters, double footprint)
+{
+    int lanes = Math.Max(1, (int)Math.Ceiling(Math.Max(0, meters) / Math.Max(0.1, footprint)));
+    return meters.ToString("0.00") + " m (" + lanes.ToString() + ")";
 }
 
 string GetLoadingSymbol()
@@ -1830,21 +1882,42 @@ void RefreshCachedShipDimensions()
         return;
     }
 
-    Vector3I min = blocks[0].Min;
-    Vector3I max = blocks[0].Max;
+    Vector3D right = rc.WorldMatrix.Right;
+    Vector3D up = rc.WorldMatrix.Up;
+    Vector3D forward = rc.WorldMatrix.Forward;
+    double minRight = double.MaxValue;
+    double maxRight = double.MinValue;
+    double minUp = double.MaxValue;
+    double maxUp = double.MinValue;
+    double minForward = double.MaxValue;
+    double maxForward = double.MinValue;
+
     foreach (var b in blocks)
     {
-        min.X = Math.Min(min.X, b.Min.X);
-        min.Y = Math.Min(min.Y, b.Min.Y);
-        min.Z = Math.Min(min.Z, b.Min.Z);
-        max.X = Math.Max(max.X, b.Max.X);
-        max.Y = Math.Max(max.Y, b.Max.Y);
-        max.Z = Math.Max(max.Z, b.Max.Z);
+        for (int x = b.Min.X; x <= b.Max.X; x += Math.Max(1, b.Max.X - b.Min.X))
+        {
+            for (int y = b.Min.Y; y <= b.Max.Y; y += Math.Max(1, b.Max.Y - b.Min.Y))
+            {
+                for (int z = b.Min.Z; z <= b.Max.Z; z += Math.Max(1, b.Max.Z - b.Min.Z))
+                {
+                    Vector3D p = Me.CubeGrid.GridIntegerToWorld(new Vector3I(x, y, z));
+                    double dRight = Vector3D.Dot(p, right);
+                    double dUp = Vector3D.Dot(p, up);
+                    double dForward = Vector3D.Dot(p, forward);
+                    minRight = Math.Min(minRight, dRight);
+                    maxRight = Math.Max(maxRight, dRight);
+                    minUp = Math.Min(minUp, dUp);
+                    maxUp = Math.Max(maxUp, dUp);
+                    minForward = Math.Min(minForward, dForward);
+                    maxForward = Math.Max(maxForward, dForward);
+                }
+            }
+        }
     }
     double size = Me.CubeGrid.GridSize;
-    cachedShipWidth = (Math.Abs(max.X - min.X) + 1) * size;
-    cachedShipHeight = (Math.Abs(max.Y - min.Y) + 1) * size;
-    cachedShipLength = (Math.Abs(max.Z - min.Z) + 1) * size;
+    cachedShipWidth = Math.Max(0, maxRight - minRight) + size;
+    cachedShipHeight = Math.Max(0, maxUp - minUp) + size;
+    cachedShipLength = Math.Max(0, maxForward - minForward) + size;
 }
 
 double GetMinerHydrogenPercent()
