@@ -778,8 +778,8 @@ int GetMinerMenuItemCount()
     if (miLcdMenu == MiLcdMenu.Main) return 4;
     if (miLcdMenu == MiLcdMenu.BehaviorSettings) return miBehaviorPage == 0 ? 8 : 6;
     if (miLcdMenu == MiLcdMenu.RecordPath) return 6;
-    if (miLcdMenu == MiLcdMenu.SetMinePose) return 3;
-    if (miLcdMenu == MiLcdMenu.SetCornerA) return 3;
+    if (miLcdMenu == MiLcdMenu.SetMinePose) return 4;
+    if (miLcdMenu == MiLcdMenu.SetCornerA) return 4;
     if (miLcdMenu == MiLcdMenu.MineArea) return 4;
     if (miLcdMenu == MiLcdMenu.FollowPath) return IsExcavationZoneActive() ? 5 : 4;
     if (miLcdMenu == MiLcdMenu.AppendPathConfirm) return 2;
@@ -971,6 +971,8 @@ void SelectMinerCursor()
         }
         else if (miMenuIndex == 2)
             BeginMinerEdit(1);
+        else if (miMenuIndex == 3)
+            CancelPathRecordMineSetup();
         return;
     }
 
@@ -984,6 +986,8 @@ void SelectMinerCursor()
         }
         else if (miMenuIndex == 2)
             BeginMinerEdit(1);
+        else if (miMenuIndex == 3)
+            CancelPathRecordMineSetup();
         return;
     }
 
@@ -1344,6 +1348,7 @@ void AppendMinerRows(StringBuilder sb)
     {
         AppendMinerMenuRow(sb, "Set Corner B", 1, false);
         AppendMinerValueRow(sb, "Depth in meters", 2, miEditingValue && miEditingIndex == 1 ? miEditValue : pathRecordMineDepth, "", "0.0");
+        AppendMinerMenuRow(sb, "Cancel Excavation Zone.", 3, false);
         return;
     }
 
@@ -1353,6 +1358,7 @@ void AppendMinerRows(StringBuilder sb)
         AppendMinerValueRow(sb, "Depth in meters", 2, miEditingValue && miEditingIndex == 1 ? miEditValue : pathRecordMineDepth, "", "0.0");
         sb.AppendLine("   Height: " + GetRecordAreaHeightMultiple().ToString("0.0"));
         sb.AppendLine("   Width: " + GetRecordAreaWidthMultiple().ToString("0.0"));
+        AppendMinerMenuRow(sb, "Cancel Excavation Zone.", 3, false);
         return;
     }
 
@@ -1503,11 +1509,13 @@ string GetMinerFooterInfo()
     {
         if (miMenuIndex == 1) return "Save second mining corner.";
         if (miMenuIndex == 2) return "Set this mine area's depth.";
+        if (miMenuIndex == 3) return "Cancel this Excavation Zone setup.";
     }
     if (miLcdMenu == MiLcdMenu.SetCornerA)
     {
         if (miMenuIndex == 1) return "Save second mining corner.";
         if (miMenuIndex == 2) return "Set this mine area's depth.";
+        if (miMenuIndex == 3) return "Cancel this Excavation Zone setup.";
     }
     if (miLcdMenu == MiLcdMenu.MineArea)
     {
@@ -4299,6 +4307,42 @@ void CancelRecordedExcavationZone()
     OpenMinerMenu(MiLcdMenu.RecordPath);
     miMenuIndex = 1;
     Echo("Excavation Zone cancelled. Path recording resumed.");
+}
+
+void CancelPathRecordMineSetup()
+{
+    if (!pathRecordingEnabled)
+        return;
+
+    ReleasePathRecordMineConfirmHold();
+    if (!string.IsNullOrWhiteSpace(pathRecordPendingMineAreaLine))
+        RemovePathTimerLine(pathRecordPendingMineAreaLine);
+    ClearPathRecordMineBoundaryLock();
+    pathRecordingPaused = false;
+    pathRecordingWaitReturn = false;
+    pathRecordMineStage = PathRecordMineStage.Idle;
+    resumePathRecordingAfterMineArea = false;
+    pathRecordMinePreviewActive = false;
+    pathRecordMineConfirmPending = false;
+    pathRecordMineConfirmHoldActive = false;
+    pathRecordMineEntry = Vector3D.Zero;
+    pathRecordMineCornerA = Vector3D.Zero;
+    pathRecordMineCornerB = Vector3D.Zero;
+    pathRecordPendingMineAreaLine = "";
+    activeMineAreaRecordIndex = -1;
+    activeMineAreaRecordLine = "";
+    mineAreaAdjustmentDirty = false;
+    hasTarget = false;
+    autopilotEnabled = false;
+    activeMaxSpeed = 0;
+    pathRecordLastPos = rc.GetPosition();
+    SetMineIndicatorSensor(false);
+    SetCockpitGyroControl(true);
+    ResetMovement();
+    fullStateDirty = true;
+    OpenMinerMenu(MiLcdMenu.RecordPath);
+    miMenuIndex = 1;
+    Echo("Excavation Zone setup cancelled. Path recording resumed.");
 }
 
 bool RemovePathTimerLine(string lineToRemove)
