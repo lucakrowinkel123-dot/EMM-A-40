@@ -167,9 +167,6 @@ double areaPlanRowStep = 0;
 double areaPlanColStart = 0;
 double areaPlanColStep = 0;
 const string mineAreaSkipMetaPrefix = "00;";
-const string mineAreaSkipMetaLegacyEncodedPrefix = "minearea_skip$";
-const string mineAreaSkipMetaLegacyPrefix = "minearea_skip;";
-const string mineAreaSkipMetaKey = "EMM-A-MI";
 List<int> areaSkipLaneIndexes = new List<int>(); // zero-based lanes loaded from the metadata line below the minearea
 List<int> areaEmptyLaneIndexes = new List<int>(); // zero-based lanes proven empty during this run
 bool areaCurrentLaneSawOre = false;
@@ -278,6 +275,9 @@ AutoServiceState autoServiceState = AutoServiceState.None;
 string autoServiceReason = "";
 bool autoServiceResumePathTimer = false;
 bool autoServiceResumeMineArea = false;
+bool autoServiceResumePathRecordingPreview = false;
+bool autoServicePreviewRecall = false;
+bool autoServicePreviewReturnActive = false;
 int autoServiceResumeMineAreaRecordIndex = -1;
 int autoServiceResumeAreaLaneIndex = 0;
 Vector3D autoServiceResumeMineEntryPos = Vector3D.Zero;
@@ -3563,9 +3563,7 @@ bool IsMineAreaSkipMetaLine(string line)
     if (string.IsNullOrWhiteSpace(line))
         return false;
     string trimmed = line.Trim();
-    return trimmed.StartsWith(mineAreaSkipMetaPrefix, StringComparison.OrdinalIgnoreCase) ||
-           trimmed.StartsWith(mineAreaSkipMetaLegacyEncodedPrefix, StringComparison.OrdinalIgnoreCase) ||
-           trimmed.StartsWith(mineAreaSkipMetaLegacyPrefix, StringComparison.OrdinalIgnoreCase);
+    return trimmed.StartsWith(mineAreaSkipMetaPrefix, StringComparison.OrdinalIgnoreCase);
 }
 
 bool IsPathMetadataRecord(string line)
@@ -3595,78 +3593,59 @@ void SortLaneIndexes(List<int> lanes)
 
 string FormatMineAreaSkipMetaLine(double mineHeight, double mineWidth, int laneCount, List<int> skipLanes)
 {
+    if (skipLanes == null)
+        skipLanes = new List<int>();
     SortLaneIndexes(skipLanes);
-    StringBuilder sb = new StringBuilder();
-    sb.Append("h=");
-    sb.Append(mineHeight.ToString("0.00"));
-    sb.Append(";w=");
-    sb.Append(mineWidth.ToString("0.00"));
-    sb.Append(";count=");
-    sb.Append(laneCount);
-    sb.Append(";skip=");
-    for (int i = 0; i < skipLanes.Count; i++)
-    {
-        if (i > 0)
-            sb.Append(",");
-        sb.Append(skipLanes[i] + 1);
-    }
-    return mineAreaSkipMetaPrefix + EncodeMineAreaSkipMetaPayload(sb.ToString());
+    return mineAreaSkipMetaPrefix + FormatCompactMineAreaSkipMetaPayload(mineHeight, mineWidth, laneCount, skipLanes);
 }
 
-string EncodeMineAreaSkipMetaPayload(string payload)
+string FormatCompactMineAreaSkipMetaPayload(double mineHeight, double mineWidth, int laneCount, List<int> skipLanes)
 {
-    if (string.IsNullOrEmpty(payload))
-        return "";
-
-    StringBuilder sb = new StringBuilder(payload.Length * 4);
-    for (int i = 0; i < payload.Length; i++)
-    {
-        if (i > 0)
-            sb.Append(";");
-        int key = mineAreaSkipMetaKey[i % mineAreaSkipMetaKey.Length];
-        int encoded = ((int)payload[i]) ^ key;
-        sb.Append(encoded.ToString("000"));
-    }
+    StringBuilder sb = new StringBuilder();
+    sb.Append(FormatCompactMetaDouble(mineHeight));
+    sb.Append(",");
+    sb.Append(FormatCompactMetaDouble(mineWidth));
+    sb.Append(",");
+    sb.Append(laneCount);
+    sb.Append(":");
+    sb.Append(FormatCompactLaneRanges(skipLanes));
     return sb.ToString();
 }
 
-bool TryDecodeMineAreaSkipMetaPayload(string encoded, out string payload)
+string FormatCompactMetaDouble(double value)
 {
-    payload = "";
-    if (string.IsNullOrWhiteSpace(encoded))
-        return false;
-
-    string[] parts = encoded.Split(';');
-    StringBuilder sb = new StringBuilder(parts.Length);
-    for (int i = 0; i < parts.Length; i++)
-    {
-        int value;
-        if (!int.TryParse(parts[i].Trim(), out value))
-            return false;
-        int key = mineAreaSkipMetaKey[i % mineAreaSkipMetaKey.Length];
-        sb.Append((char)(value ^ key));
-    }
-    payload = sb.ToString();
-    return true;
+    return value.ToString("0.##");
 }
 
-bool TryDecodeLegacyMineAreaSkipMetaPayload(string encoded, out string payload)
+string FormatCompactLaneRanges(List<int> skipLanes)
 {
-    payload = "";
-    if (string.IsNullOrWhiteSpace(encoded) || (encoded.Length % 2) != 0)
-        return false;
+    if (skipLanes == null || skipLanes.Count == 0)
+        return "";
 
-    StringBuilder sb = new StringBuilder(encoded.Length / 2);
-    for (int i = 0; i < encoded.Length; i += 2)
+    StringBuilder sb = new StringBuilder();
+    int start = skipLanes[0] + 1;
+    int end = start;
+    for (int i = 1; i <= skipLanes.Count; i++)
     {
-        int value;
-        if (!int.TryParse(encoded.Substring(i, 2), System.Globalization.NumberStyles.HexNumber, null, out value))
-            return false;
-        int key = mineAreaSkipMetaKey[(i / 2) % mineAreaSkipMetaKey.Length];
-        sb.Append((char)(value ^ key));
+        int lane = i < skipLanes.Count ? skipLanes[i] + 1 : -1;
+        if (lane == end + 1)
+        {
+            end = lane;
+            continue;
+        }
+
+        if (sb.Length > 0)
+            sb.Append(",");
+        sb.Append(start);
+        if (end != start)
+        {
+            sb.Append("-");
+            sb.Append(end);
+        }
+        start = lane;
+        end = lane;
     }
-    payload = sb.ToString();
-    return true;
+    return sb.ToString();
 }
 
 bool TryParseMineAreaSkipMetaLine(string line, out double mineHeight, out double mineWidth, out int laneCount, List<int> skipLanes)
@@ -3680,51 +3659,71 @@ bool TryParseMineAreaSkipMetaLine(string line, out double mineHeight, out double
         return false;
 
     string trimmed = line.Trim();
-    string payload;
-    if (trimmed.StartsWith(mineAreaSkipMetaPrefix, StringComparison.OrdinalIgnoreCase))
-    {
-        if (!TryDecodeMineAreaSkipMetaPayload(trimmed.Substring(mineAreaSkipMetaPrefix.Length), out payload))
-            return false;
-    }
-    else if (trimmed.StartsWith(mineAreaSkipMetaLegacyEncodedPrefix, StringComparison.OrdinalIgnoreCase))
-    {
-        if (!TryDecodeLegacyMineAreaSkipMetaPayload(trimmed.Substring(mineAreaSkipMetaLegacyEncodedPrefix.Length), out payload))
-            return false;
-    }
-    else
-    {
-        payload = trimmed.Substring(mineAreaSkipMetaLegacyPrefix.Length);
-    }
-
-    string[] parts = payload.Split(';');
-    for (int i = 0; i < parts.Length; i++)
-    {
-        string part = parts[i].Trim();
-        int eq = part.IndexOf('=');
-        if (eq <= 0)
-            continue;
-        string key = part.Substring(0, eq).Trim();
-        string value = part.Substring(eq + 1).Trim();
-        if (key.Equals("h", StringComparison.OrdinalIgnoreCase))
-            double.TryParse(value, out mineHeight);
-        else if (key.Equals("w", StringComparison.OrdinalIgnoreCase))
-            double.TryParse(value, out mineWidth);
-        else if (key.Equals("count", StringComparison.OrdinalIgnoreCase))
-            int.TryParse(value, out laneCount);
-        else if (key.Equals("skip", StringComparison.OrdinalIgnoreCase))
-        {
-            string[] laneParts = value.Split(',');
-            for (int l = 0; l < laneParts.Length; l++)
-            {
-                int oneBasedLane;
-                if (int.TryParse(laneParts[l].Trim(), out oneBasedLane) && oneBasedLane > 0)
-                    AddLaneIndexUnique(skipLanes, oneBasedLane - 1);
-            }
-        }
-    }
-
+    if (!TryParseCompactMineAreaSkipMetaPayload(trimmed.Substring(mineAreaSkipMetaPrefix.Length),
+                                                out mineHeight, out mineWidth, out laneCount, skipLanes))
+        return false;
     SortLaneIndexes(skipLanes);
     return mineHeight > 0 && mineWidth > 0 && laneCount > 0;
+}
+
+bool TryParseCompactMineAreaSkipMetaPayload(string payload, out double mineHeight, out double mineWidth, out int laneCount, List<int> skipLanes)
+{
+    mineHeight = 0;
+    mineWidth = 0;
+    laneCount = 0;
+    if (string.IsNullOrWhiteSpace(payload))
+        return false;
+
+    string[] parts = payload.Split(':');
+    if (parts.Length < 1 || parts.Length > 2)
+        return false;
+
+    string[] header = parts[0].Split(',');
+    if (header.Length != 3)
+        return false;
+
+    if (!double.TryParse(header[0].Trim(), out mineHeight) ||
+        !double.TryParse(header[1].Trim(), out mineWidth) ||
+        !int.TryParse(header[2].Trim(), out laneCount))
+        return false;
+
+    if (parts.Length == 2 && !string.IsNullOrWhiteSpace(parts[1]))
+    {
+        string[] laneParts = parts[1].Split(',');
+        for (int i = 0; i < laneParts.Length; i++)
+            if (!TryAddCompactLaneToken(laneParts[i].Trim(), skipLanes))
+                return false;
+    }
+
+    return mineHeight > 0 && mineWidth > 0 && laneCount > 0;
+}
+
+bool TryAddCompactLaneToken(string token, List<int> lanes)
+{
+    if (string.IsNullOrWhiteSpace(token))
+        return true;
+
+    int dash = token.IndexOf('-');
+    if (dash > 0)
+    {
+        int first;
+        int last;
+        if (!int.TryParse(token.Substring(0, dash).Trim(), out first) ||
+            !int.TryParse(token.Substring(dash + 1).Trim(), out last) ||
+            first <= 0 ||
+            last < first)
+            return false;
+
+        for (int lane = first; lane <= last; lane++)
+            AddLaneIndexUnique(lanes, lane - 1);
+        return true;
+    }
+
+    int oneBasedLane;
+    if (!int.TryParse(token.Trim(), out oneBasedLane) || oneBasedLane <= 0)
+        return false;
+    AddLaneIndexUnique(lanes, oneBasedLane - 1);
+    return true;
 }
 
 bool MineAreaSkipMetaMatches(double mineHeight, double mineWidth, int laneCount)
@@ -4776,7 +4775,7 @@ void BuildRecallRecords()
     recallIndex = 0;
     recallLastTotal = pathRecords.Count;
     int current = Math.Max(0, Math.Min(pathIndex, pathRecords.Count));
-    recallReverseMode = pathRecords.Count > 0 && current * 3 < pathRecords.Count;
+    recallReverseMode = autoServicePreviewRecall || (pathRecords.Count > 0 && current * 3 < pathRecords.Count);
 
     if (recallReverseMode)
     {
@@ -4981,25 +4980,35 @@ void UpdateAutoServiceReturn()
 
 bool ShouldCheckAutoServiceReturn()
 {
-    return autoServiceReturnEnabled &&
-           pathMode &&
-           pathRecords.Count > 0 &&
-           !pathPaused &&
-           !recallActive &&
-           dockingState == DockingState.None &&
-           !dockRetryPending &&
-           !pathDockPending &&
-           !pathRecordingEnabled &&
-           !appendPathActive &&
-           !IsMinerDocked() &&
-           !IsMergerDocked() &&
-           oreTransferStartDelayTicks <= 0 &&
-           !oreTransferActive;
+    if (!autoServiceReturnEnabled ||
+        recallActive ||
+        dockingState != DockingState.None ||
+        dockRetryPending ||
+        pathDockPending ||
+        appendPathActive ||
+        autoServicePreviewReturnActive ||
+        IsMinerDocked() ||
+        IsMergerDocked() ||
+        oreTransferStartDelayTicks > 0 ||
+        oreTransferActive)
+        return false;
+
+    if (pathMode &&
+        pathRecords.Count > 0 &&
+        !pathPaused &&
+        !pathRecordingEnabled)
+        return true;
+
+    return CanAutoServicePreviewMineArea();
 }
 
 void StartAutoServiceReturn(string reason)
 {
     if (!ShouldCheckAutoServiceReturn())
+        return;
+
+    bool previewMineArea = CanAutoServicePreviewMineArea();
+    if (previewMineArea && !PreparePreviewMineAreaAutoServiceReturn())
         return;
 
     autoServiceState = AutoServiceState.Returning;
@@ -5014,6 +5023,9 @@ void StartAutoServiceReturn(string reason)
     autoServiceResumeMineEntryPos = autoServiceResumeMineArea ? areaMineEntryPos : Vector3D.Zero;
     autoServiceResumeMineEntryForward = autoServiceResumeMineArea ? areaMineEntryForward : Vector3D.Zero;
     autoServiceResumeMineEntryUp = autoServiceResumeMineArea ? areaMineEntryUp : Vector3D.Zero;
+    autoServiceResumePathRecordingPreview = previewMineArea;
+    autoServicePreviewRecall = previewMineArea;
+    autoServicePreviewReturnActive = false;
     autoServiceActionRetryTicks = 0;
     saveAsteroidAfterDock = false;
     updateAsteroidAfterDock = false;
@@ -5027,6 +5039,50 @@ void StartAutoServiceReturn(string reason)
     }
 
     Echo("Auto service: returning for " + autoServiceReason + ".");
+}
+
+bool CanAutoServicePreviewMineArea()
+{
+    return pathRecordingEnabled &&
+           pathRecordingPaused &&
+           pathRecordMinePreviewActive &&
+           resumePathRecordingAfterMineArea &&
+           !pathRecordMineConfirmPending &&
+           areaMiningMode &&
+           activeMineAreaRecordIndex >= 0 &&
+           (miningEnabled || autopilotEnabled || hasTarget);
+}
+
+bool PreparePreviewMineAreaAutoServiceReturn()
+{
+    List<string> loaded;
+    string timerName;
+    if (!TryLoadPathRecordsFromTimer(out loaded, out timerName))
+    {
+        Echo($"Auto service denied: unable to load path records from timer tag '{pathTimerTag}'.");
+        return false;
+    }
+    if (activeMineAreaRecordIndex < 0 || activeMineAreaRecordIndex >= loaded.Count)
+    {
+        Echo("Auto service denied: active preview Excavation Zone is not in the path timer.");
+        return false;
+    }
+
+    pathRecords = loaded;
+    pathIndex = Math.Max(0, Math.Min(activeMineAreaRecordIndex, pathRecords.Count));
+    pathMode = true;
+    pathPaused = false;
+    pathPausedNavResume = false;
+    pathDockPending = false;
+    pathCompleteBroadcastTicks = 0;
+    appendPathActive = false;
+    appendPathStopRecordIndex = -1;
+
+    resumePathRecordingAfterMineArea = false;
+    pathRecordMinePreviewActive = false;
+    pathRecordingWaitReturn = false;
+    pathRecordMineStage = PathRecordMineStage.Idle;
+    return true;
 }
 
 void UpdateAutoServiceState()
@@ -5080,8 +5136,14 @@ void UpdateAutoServiceState()
         autoServiceActionRetryTicks = 0;
         pathPaused = false;
         pathPausedNavResume = false;
+        bool resumePreviewMineArea = autoServiceResumePathRecordingPreview;
         if (autoServiceResumePathTimer && pathRunTimerStarted)
             pathRunTimerActive = true;
+        if (resumePreviewMineArea)
+        {
+            StartPreviewMineAreaPathReturn();
+            return;
+        }
         if (autoServiceResumeMineArea && ResumeAutoServiceMineArea())
         {
             ClearAutoServiceResumeTarget();
@@ -5095,6 +5157,118 @@ void UpdateAutoServiceState()
         fullStateDirty = true;
         Echo("Auto service: resumed path.");
     }
+}
+
+void StartPreviewMineAreaPathReturn()
+{
+    if (pathRecords.Count == 0)
+    {
+        List<string> loaded;
+        string timerName;
+        if (TryLoadPathRecordsFromTimer(out loaded, out timerName))
+            pathRecords = loaded;
+    }
+
+    if (autoServiceResumeMineAreaRecordIndex < 0 ||
+        autoServiceResumeMineAreaRecordIndex >= pathRecords.Count)
+    {
+        FailPreviewAutoServiceReturn("Auto service: preview Excavation Zone return failed; saved minearea record is missing.");
+        return;
+    }
+
+    autoServiceState = AutoServiceState.None;
+    autoServiceReason = "";
+    autoServiceActionRetryTicks = 0;
+    autoServicePreviewReturnActive = true;
+    autoServicePreviewRecall = false;
+    pathMode = true;
+    pathPaused = false;
+    pathPausedNavResume = false;
+    pathDockPending = false;
+    pathCompleteBroadcastTicks = 0;
+    pathRecordingEnabled = false;
+    pathRecordingPaused = false;
+    pathRecordingWaitReturn = false;
+    pathRecordMinePreviewActive = false;
+    resumePathRecordingAfterMineArea = false;
+    pathRecordMineStage = PathRecordMineStage.Idle;
+
+    int startIndex = 0;
+    while (startIndex < pathRecords.Count)
+    {
+        string record = NormalizePathRecord(pathRecords[startIndex]);
+        if (IsPathMetadataRecord(record) ||
+            record.Equals("dock", StringComparison.OrdinalIgnoreCase) ||
+            record.Equals("undock", StringComparison.OrdinalIgnoreCase))
+        {
+            startIndex++;
+            continue;
+        }
+        break;
+    }
+    pathIndex = Math.Max(0, Math.Min(startIndex, autoServiceResumeMineAreaRecordIndex));
+    ResetPathRunTimer();
+    fullStateDirty = true;
+    Echo("Auto service: returning to preview Excavation Zone.");
+    StartNextPathRecord();
+}
+
+void RestorePreviewMineAreaRecordingState()
+{
+    pathRecordingEnabled = true;
+    pathRecordingPaused = true;
+    pathRecordingWaitReturn = false;
+    pathRecordMineStage = PathRecordMineStage.Idle;
+    pathRecordMineConfirmPending = false;
+    pathRecordMineConfirmHoldActive = false;
+    resumePathRecordingAfterMineArea = true;
+    pathRecordMinePreviewActive = true;
+}
+
+bool CompletePreviewAutoServiceReturnToMineArea()
+{
+    RestorePreviewMineAreaRecordingState();
+    if (autoServiceResumeMineArea && ResumeAutoServiceMineArea())
+    {
+        ClearTemporaryPreviewPathMode();
+        ClearAutoServiceResumeTarget();
+        autoServiceResumePathTimer = false;
+        fullStateDirty = true;
+        Echo("Auto service: resumed preview Excavation Zone.");
+        return miningEnabled || autopilotEnabled;
+    }
+
+    FailPreviewAutoServiceReturn("Auto service: preview Excavation Zone resume failed.");
+    return false;
+}
+
+void FailPreviewAutoServiceReturn(string message)
+{
+    RestorePreviewMineAreaRecordingState();
+    ClearTemporaryPreviewPathMode();
+    ClearAutoServiceResumeTarget();
+    autoServiceResumePathTimer = false;
+    autoServiceState = AutoServiceState.None;
+    autoServiceReason = "";
+    autoServiceActionRetryTicks = 0;
+    fullStateDirty = true;
+    Echo(message);
+}
+
+void ClearTemporaryPreviewPathMode()
+{
+    if (!autoServiceResumePathRecordingPreview)
+        return;
+
+    autoServicePreviewReturnActive = false;
+    pathMode = false;
+    pathPaused = false;
+    pathPausedNavResume = false;
+    pathDockPending = false;
+    pathRecords.Clear();
+    pathIndex = 0;
+    StopPathRunTimer();
+    pathCompleteBroadcastTicks = 0;
 }
 
 void RetryAutoServiceDock()
@@ -5205,6 +5379,9 @@ void ClearAutoServiceState()
     autoServiceState = AutoServiceState.None;
     autoServiceReason = "";
     autoServiceResumePathTimer = false;
+    autoServiceResumePathRecordingPreview = false;
+    autoServicePreviewRecall = false;
+    autoServicePreviewReturnActive = false;
     autoServiceActionRetryTicks = 0;
     ClearAutoServiceResumeTarget();
 }
@@ -5212,6 +5389,9 @@ void ClearAutoServiceState()
 void ClearAutoServiceResumeTarget()
 {
     autoServiceResumeMineArea = false;
+    autoServiceResumePathRecordingPreview = false;
+    autoServicePreviewRecall = false;
+    autoServicePreviewReturnActive = false;
     autoServiceResumeMineAreaRecordIndex = -1;
     autoServiceResumeAreaLaneIndex = 0;
     autoServiceResumeMineEntryPos = Vector3D.Zero;
@@ -5934,14 +6114,23 @@ void StartNextPathRecord()
             continue;
         if (ExecutePathRecord(record))
         {
-            StartPathRunTimer();
+            if (pathMode)
+                StartPathRunTimer();
             return;
         }
+        if (autoServicePreviewReturnActive && IsMineAreaPathRecord(record))
+            continue;
         Echo($"Skipping invalid path record #{pathIndex}.");
     }
 
     if (pathMode && pathIndex >= pathRecords.Count)
     {
+        if (autoServicePreviewReturnActive)
+        {
+            FailPreviewAutoServiceReturn("Auto service: preview Excavation Zone return failed before reaching the saved minearea.");
+            return;
+        }
+
         pathMode = false;
         StopPathRunTimer();
         if (!suppressPathRuntimeWrite)
@@ -6063,6 +6252,14 @@ bool ExecutePathRecord(string rawRecord)
 
     if (record.StartsWith("minearea;", StringComparison.OrdinalIgnoreCase))
     {
+        if (autoServicePreviewReturnActive)
+        {
+            int recordIndex = Math.Max(0, pathIndex - 1);
+            if (recordIndex == autoServiceResumeMineAreaRecordIndex)
+                return CompletePreviewAutoServiceReturnToMineArea();
+            return false;
+        }
+
         activeMineAreaRecordIndex = Math.Max(0, pathIndex - 1);
         activeMineAreaRecordLine = record;
         StartAreaMining(record);
@@ -6131,6 +6328,14 @@ bool ExecutePathRecord(string rawRecord)
             autopilotEnabled = true;
             activeMaxSpeed = SPEEDB;
             return true;
+        }
+
+        if (autoServicePreviewReturnActive)
+        {
+            int recordIndex = Math.Max(0, pathIndex - 1);
+            if (recordIndex == autoServiceResumeMineAreaRecordIndex)
+                return CompletePreviewAutoServiceReturnToMineArea();
+            return false;
         }
 
         activeMineAreaRecordIndex = Math.Max(0, pathIndex - 1);
@@ -7164,6 +7369,13 @@ void NextHole(bool skipToLast = false)
     }
 }
 
+bool IsMineAreaPathRecord(string record)
+{
+    string normalized = NormalizePathRecord(record);
+    return normalized.StartsWith("minearea;", StringComparison.OrdinalIgnoreCase) ||
+           LineLooksLikeMineArea(normalized);
+}
+
 void ReturnToRecordedMinePoseWithoutPreview()
 {
     ClearPathRecordMineBoundaryLock();
@@ -7480,6 +7692,9 @@ void SaveState()
     ini.Set(StateIniSection, "autoServiceReason", autoServiceReason);
     ini.Set(StateIniSection, "autoServiceResumePathTimer", autoServiceResumePathTimer ? "1" : "0");
     ini.Set(StateIniSection, "autoServiceResumeMineArea", autoServiceResumeMineArea ? "1" : "0");
+    ini.Set(StateIniSection, "autoServiceResumePathRecordingPreview", autoServiceResumePathRecordingPreview ? "1" : "0");
+    ini.Set(StateIniSection, "autoServicePreviewRecall", autoServicePreviewRecall ? "1" : "0");
+    ini.Set(StateIniSection, "autoServicePreviewReturnActive", autoServicePreviewReturnActive ? "1" : "0");
     ini.Set(StateIniSection, "autoServiceResumeMineAreaRecordIndex", autoServiceResumeMineAreaRecordIndex);
     ini.Set(StateIniSection, "autoServiceResumeAreaLaneIndex", autoServiceResumeAreaLaneIndex);
     ini.Set(StateIniSection, "autoServiceResumeMineEntryPos", V3ToString(autoServiceResumeMineEntryPos));
@@ -7598,6 +7813,9 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "autoServiceReason", autoServiceReason);
     ini.Set(ProgressIniSection, "autoServiceResumePathTimer", autoServiceResumePathTimer ? "1" : "0");
     ini.Set(ProgressIniSection, "autoServiceResumeMineArea", autoServiceResumeMineArea ? "1" : "0");
+    ini.Set(ProgressIniSection, "autoServiceResumePathRecordingPreview", autoServiceResumePathRecordingPreview ? "1" : "0");
+    ini.Set(ProgressIniSection, "autoServicePreviewRecall", autoServicePreviewRecall ? "1" : "0");
+    ini.Set(ProgressIniSection, "autoServicePreviewReturnActive", autoServicePreviewReturnActive ? "1" : "0");
     ini.Set(ProgressIniSection, "autoServiceResumeMineAreaRecordIndex", autoServiceResumeMineAreaRecordIndex);
     ini.Set(ProgressIniSection, "autoServiceResumeAreaLaneIndex", autoServiceResumeAreaLaneIndex);
     ini.Set(ProgressIniSection, "autoServiceResumeMineEntryPos", V3ToString(autoServiceResumeMineEntryPos));
@@ -7812,6 +8030,9 @@ void LoadState()
     autoServiceReason = StateString(ini, "autoServiceReason", autoServiceReason);
     autoServiceResumePathTimer = StateBool(ini, "autoServiceResumePathTimer", autoServiceResumePathTimer);
     autoServiceResumeMineArea = StateBool(ini, "autoServiceResumeMineArea", autoServiceResumeMineArea);
+    autoServiceResumePathRecordingPreview = StateBool(ini, "autoServiceResumePathRecordingPreview", autoServiceResumePathRecordingPreview);
+    autoServicePreviewRecall = StateBool(ini, "autoServicePreviewRecall", autoServicePreviewRecall);
+    autoServicePreviewReturnActive = StateBool(ini, "autoServicePreviewReturnActive", autoServicePreviewReturnActive);
     if (int.TryParse(StateString(ini, "autoServiceResumeMineAreaRecordIndex", autoServiceResumeMineAreaRecordIndex.ToString()), out n))
         autoServiceResumeMineAreaRecordIndex = n;
     if (int.TryParse(StateString(ini, "autoServiceResumeAreaLaneIndex", autoServiceResumeAreaLaneIndex.ToString()), out n))
