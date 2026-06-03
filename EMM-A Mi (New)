@@ -890,6 +890,13 @@ void SelectMinerCursor()
             miMenuIndex = mineAreaAdjustCornerA ? 2 : 3;
             return;
         }
+        if (miLcdMenu == MiLcdMenu.SetMinePose ||
+            miLcdMenu == MiLcdMenu.SetCornerA)
+        {
+            OpenMinerMenu(MiLcdMenu.RecordPath);
+            miMenuIndex = 1;
+            return;
+        }
         if (miLcdMenu == MiLcdMenu.MineArea && pathMode)
         {
             OpenMinerMenu(MiLcdMenu.FollowPath);
@@ -926,6 +933,12 @@ void SelectMinerCursor()
         {
             OpenMinerMenu(MiLcdMenu.ConfirmExcavationZone);
             miMenuIndex = 0;
+            return;
+        }
+        if (IsPathRecordMineSetupActive())
+        {
+            OpenMinerMenu(MiLcdMenu.SetCornerA);
+            miMenuIndex = 1;
             return;
         }
         if (IsExcavationZoneActive())
@@ -1498,6 +1511,7 @@ string GetMinerFooterInfo()
         if (miMenuIndex == 1)
         {
             if (pathRecordMineConfirmPending) return "Confirm/adjust Excavation Zone.";
+            if (IsPathRecordMineSetupActive()) return "Continue Excavation Zone setup.";
             return IsExcavationZoneActive() ? "Open Excavation Zone tools." : "Save first mining corner.";
         }
         if (miMenuIndex == 2) return "Meters between points.";
@@ -1773,6 +1787,8 @@ string GetRecordPathExcavationMenuText()
 {
     if (pathRecordMineConfirmPending)
         return "Confirm Excavation Zone";
+    if (IsPathRecordMineSetupActive())
+        return "Set Corner B";
     if (IsExcavationZoneActive())
         return "Excavation Zone";
     return "Set Corner A";
@@ -1785,8 +1801,16 @@ bool IsExcavationZoneActive()
            returnToMinePoseAfterArea ||
            pathRecordingWaitReturn ||
            pathRecordMineConfirmPending ||
-           pathRecordMineStage != PathRecordMineStage.Idle ||
            mineAreaAdjustStage != MineAreaAdjustStage.None;
+}
+
+bool IsPathRecordMineSetupActive()
+{
+    return pathRecordingEnabled &&
+           !pathRecordingWaitReturn &&
+           !pathRecordMineConfirmPending &&
+           (pathRecordMineStage == PathRecordMineStage.EntryCaptured ||
+            pathRecordMineStage == PathRecordMineStage.CornerCaptured);
 }
 
 int GetFollowPathAppendIndex()
