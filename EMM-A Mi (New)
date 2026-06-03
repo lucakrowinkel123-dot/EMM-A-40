@@ -577,7 +577,10 @@ public void Main (string argument, UpdateType updateSource)
         if (runtime % echoFrequency == 0)
         {
             WriteEcho();
-            SaveStateProgressOnly();
+            if (fullStateDirty)
+                SaveState();
+            else
+                SaveStateProgressOnly();
         }
         UpdatePathRecordAsteroidSpacing();
 
@@ -2896,6 +2899,7 @@ void StartPathRecordReverseReturn(PathRecordReverseMode mode)
     pathAnchorPos = anchorPos;
     pathAnchorForward = anchorForward;
     pathAnchorUp = anchorUp;
+    fullStateDirty = true;
     StartNextPathRecordReverseTarget();
 }
 
@@ -4156,6 +4160,7 @@ void StartAppendPath()
     appendPathActive = true;
     appendPathStopRecordIndex = lastMineArea + 1;
     suppressPathRuntimeWrite = true;
+    fullStateDirty = true;
     pathPaused = false;
     pathPausedNavResume = false;
     OpenMinerMenu(MiLcdMenu.FollowPath);
@@ -4683,6 +4688,7 @@ void StartRecallPath()
     pathPausedNavResume = false;
     pathCompleteBroadcastTicks = 0;
     saveAsteroidAfterDock = false;
+    fullStateDirty = true;
     StopPathRunTimer();
     SendRecallProgress(recallLastDone, recallLastTotal);
 
@@ -7268,6 +7274,7 @@ void FinishAreaMining()
     areaPlanValid = false;
     ClearAreaLaneSkipState();
     finishAreaAfterBackout = false;
+    fullStateDirty = true;
     if (returnToMinePoseAfterArea)
     {
         ReturnToMinePoseAfterArea();
@@ -7553,6 +7560,22 @@ bool StateBool(MyIni ini, string key, bool fallback)
     return s == "1" || s.Equals("true", StringComparison.OrdinalIgnoreCase);
 }
 
+void LoadLaneIndexList(MyIni ini, string keyPrefix, List<int> lanes)
+{
+    lanes.Clear();
+    int count;
+    if (!int.TryParse(StateString(ini, keyPrefix + "Count", "0"), out count) || count <= 0)
+        return;
+
+    for (int i = 0; i < count; i++)
+    {
+        int lane;
+        if (int.TryParse(StateString(ini, keyPrefix + i, "-1"), out lane))
+            AddLaneIndexUnique(lanes, lane);
+    }
+    SortLaneIndexes(lanes);
+}
+
 IMyTimerBlock FindStateIniTimer()
 {
     if (_cachedStateIniTimer != null &&
@@ -7606,6 +7629,13 @@ void SaveState()
     ini.Set(StateIniSection, "laneAnchor", V3ToString(laneAnchor));
     ini.Set(StateIniSection, "drillAxis", V3ToString(drillAxis));
     ini.Set(StateIniSection, "laneDepth", laneDepth.ToString("R"));
+    ini.Set(StateIniSection, "SPEEDF", SPEEDF.ToString("R"));
+    ini.Set(StateIniSection, "SPEEDB", SPEEDB.ToString("R"));
+    ini.Set(StateIniSection, "MINEH", MINEH.ToString("R"));
+    ini.Set(StateIniSection, "MINEW", MINEW.ToString("R"));
+    ini.Set(StateIniSection, "TOFFR", TOFFR.ToString("R"));
+    ini.Set(StateIniSection, "TOFFU", TOFFU.ToString("R"));
+    ini.Set(StateIniSection, "TOFFF", TOFFF.ToString("R"));
     ini.Set(StateIniSection, "activeMaxSpeed", activeMaxSpeed.ToString("R"));
     ini.Set(StateIniSection, "pointToPointAccelerationLimit", pointToPointAccelerationLimit.ToString("R"));
     ini.Set(StateIniSection, "pointToPointThrustUsePercent", pointToPointThrustUsePercent.ToString("R"));
@@ -7622,6 +7652,16 @@ void SaveState()
     ini.Set(StateIniSection, "areaMineEntryPos", V3ToString(areaMineEntryPos));
     ini.Set(StateIniSection, "areaMineEntryForward", V3ToString(areaMineEntryForward));
     ini.Set(StateIniSection, "areaMineEntryUp", V3ToString(areaMineEntryUp));
+    ini.Set(StateIniSection, "activeMineAreaRecordIndex", activeMineAreaRecordIndex);
+    ini.Set(StateIniSection, "activeMineAreaRecordLine", activeMineAreaRecordLine);
+    ini.Set(StateIniSection, "areaCurrentLaneSawOre", areaCurrentLaneSawOre ? "1" : "0");
+    ini.Set(StateIniSection, "suppressCurrentLaneEmptyRecord", suppressCurrentLaneEmptyRecord ? "1" : "0");
+    ini.Set(StateIniSection, "areaSkipLaneCount", areaSkipLaneIndexes.Count);
+    for (int i = 0; i < areaSkipLaneIndexes.Count; i++)
+        ini.Set(StateIniSection, "areaSkipLane" + i, areaSkipLaneIndexes[i]);
+    ini.Set(StateIniSection, "areaEmptyLaneCount", areaEmptyLaneIndexes.Count);
+    for (int i = 0; i < areaEmptyLaneIndexes.Count; i++)
+        ini.Set(StateIniSection, "areaEmptyLane" + i, areaEmptyLaneIndexes[i]);
     ini.Set(StateIniSection, "retryLane", retryCurrentLane ? "1" : "0");
     ini.Set(StateIniSection, "stuckBackout", stuckBackout ? "1" : "0");
     ini.Set(StateIniSection, "stuckRetryCount", stuckRetryCount);
@@ -7637,6 +7677,9 @@ void SaveState()
     ini.Set(StateIniSection, "pathRunTimerStarted", pathRunTimerStarted ? "1" : "0");
     ini.Set(StateIniSection, "pathRunTimerActive", pathRunTimerActive ? "1" : "0");
     ini.Set(StateIniSection, "pathRunElapsedTicks", pathRunElapsedTicks);
+    ini.Set(StateIniSection, "suppressPathRuntimeWrite", suppressPathRuntimeWrite ? "1" : "0");
+    ini.Set(StateIniSection, "appendPathActive", appendPathActive ? "1" : "0");
+    ini.Set(StateIniSection, "appendPathStopRecordIndex", appendPathStopRecordIndex);
     ini.Set(StateIniSection, "pathCount", pathRecords.Count);
     for (int i = 0; i < pathRecords.Count; i++)
         ini.Set(StateIniSection, "pathRecord" + i, pathRecords[i]);
@@ -7666,6 +7709,13 @@ void SaveState()
     ini.Set(StateIniSection, "pathRecordMineConfirmPending", pathRecordMineConfirmPending ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordMineConfirmHoldActive", pathRecordMineConfirmHoldActive ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordPendingMineAreaLine", pathRecordPendingMineAreaLine);
+    ini.Set(StateIniSection, "mineAreaAdjustStage", (int)mineAreaAdjustStage);
+    ini.Set(StateIniSection, "mineAreaAdjustCornerA", mineAreaAdjustCornerA ? "1" : "0");
+    ini.Set(StateIniSection, "mineAreaAdjustFromPath", mineAreaAdjustFromPath ? "1" : "0");
+    ini.Set(StateIniSection, "mineAreaAdjustSaveToCarrier", mineAreaAdjustSaveToCarrier ? "1" : "0");
+    ini.Set(StateIniSection, "mineAreaAdjustmentDirty", mineAreaAdjustmentDirty ? "1" : "0");
+    ini.Set(StateIniSection, "mineAreaAdjustPendingAfterBackout", mineAreaAdjustPendingAfterBackout ? "1" : "0");
+    ini.Set(StateIniSection, "mineAreaAdjustPendingCornerA", mineAreaAdjustPendingCornerA ? "1" : "0");
     ini.Set(StateIniSection, "pathRecordReverseMode", (int)pathRecordReverseMode);
     ini.Set(StateIniSection, "pathRecordReverseIndex", pathRecordReverseIndex);
     ini.Set(StateIniSection, "pathRecordReverseKeepLineCount", pathRecordReverseKeepLineCount);
@@ -7744,6 +7794,13 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "laneAnchor", V3ToString(laneAnchor));
     ini.Set(ProgressIniSection, "drillAxis", V3ToString(drillAxis));
     ini.Set(ProgressIniSection, "laneDepth", laneDepth.ToString("R"));
+    ini.Set(ProgressIniSection, "SPEEDF", SPEEDF.ToString("R"));
+    ini.Set(ProgressIniSection, "SPEEDB", SPEEDB.ToString("R"));
+    ini.Set(ProgressIniSection, "MINEH", MINEH.ToString("R"));
+    ini.Set(ProgressIniSection, "MINEW", MINEW.ToString("R"));
+    ini.Set(ProgressIniSection, "TOFFR", TOFFR.ToString("R"));
+    ini.Set(ProgressIniSection, "TOFFU", TOFFU.ToString("R"));
+    ini.Set(ProgressIniSection, "TOFFF", TOFFF.ToString("R"));
     ini.Set(ProgressIniSection, "activeMaxSpeed", activeMaxSpeed.ToString("R"));
     ini.Set(ProgressIniSection, "pointToPointAccelerationLimit", pointToPointAccelerationLimit.ToString("R"));
     ini.Set(ProgressIniSection, "pointToPointThrustUsePercent", pointToPointThrustUsePercent.ToString("R"));
@@ -7761,6 +7818,16 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "areaMineEntryPos", V3ToString(areaMineEntryPos));
     ini.Set(ProgressIniSection, "areaMineEntryForward", V3ToString(areaMineEntryForward));
     ini.Set(ProgressIniSection, "areaMineEntryUp", V3ToString(areaMineEntryUp));
+    ini.Set(ProgressIniSection, "activeMineAreaRecordIndex", activeMineAreaRecordIndex);
+    ini.Set(ProgressIniSection, "activeMineAreaRecordLine", activeMineAreaRecordLine);
+    ini.Set(ProgressIniSection, "areaCurrentLaneSawOre", areaCurrentLaneSawOre ? "1" : "0");
+    ini.Set(ProgressIniSection, "suppressCurrentLaneEmptyRecord", suppressCurrentLaneEmptyRecord ? "1" : "0");
+    ini.Set(ProgressIniSection, "areaSkipLaneCount", areaSkipLaneIndexes.Count);
+    for (int i = 0; i < areaSkipLaneIndexes.Count; i++)
+        ini.Set(ProgressIniSection, "areaSkipLane" + i, areaSkipLaneIndexes[i]);
+    ini.Set(ProgressIniSection, "areaEmptyLaneCount", areaEmptyLaneIndexes.Count);
+    for (int i = 0; i < areaEmptyLaneIndexes.Count; i++)
+        ini.Set(ProgressIniSection, "areaEmptyLane" + i, areaEmptyLaneIndexes[i]);
     ini.Set(ProgressIniSection, "retryLane", retryCurrentLane ? "1" : "0");
     ini.Set(ProgressIniSection, "stuckBackout", stuckBackout ? "1" : "0");
     ini.Set(ProgressIniSection, "stuckRetryCount", stuckRetryCount);
@@ -7773,6 +7840,9 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathRunTimerStarted", pathRunTimerStarted ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRunTimerActive", pathRunTimerActive ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRunElapsedTicks", pathRunElapsedTicks);
+    ini.Set(ProgressIniSection, "suppressPathRuntimeWrite", suppressPathRuntimeWrite ? "1" : "0");
+    ini.Set(ProgressIniSection, "appendPathActive", appendPathActive ? "1" : "0");
+    ini.Set(ProgressIniSection, "appendPathStopRecordIndex", appendPathStopRecordIndex);
     ini.Set(ProgressIniSection, "pathAnchorValid", pathAnchorValid ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordingEnabled", pathRecordingEnabled ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordingPaused", pathRecordingPaused ? "1" : "0");
@@ -7796,9 +7866,19 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "pathRecordMineConfirmPending", pathRecordMineConfirmPending ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordMineConfirmHoldActive", pathRecordMineConfirmHoldActive ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordPendingMineAreaLine", pathRecordPendingMineAreaLine);
+    ini.Set(ProgressIniSection, "mineAreaAdjustStage", (int)mineAreaAdjustStage);
+    ini.Set(ProgressIniSection, "mineAreaAdjustCornerA", mineAreaAdjustCornerA ? "1" : "0");
+    ini.Set(ProgressIniSection, "mineAreaAdjustFromPath", mineAreaAdjustFromPath ? "1" : "0");
+    ini.Set(ProgressIniSection, "mineAreaAdjustSaveToCarrier", mineAreaAdjustSaveToCarrier ? "1" : "0");
+    ini.Set(ProgressIniSection, "mineAreaAdjustmentDirty", mineAreaAdjustmentDirty ? "1" : "0");
+    ini.Set(ProgressIniSection, "mineAreaAdjustPendingAfterBackout", mineAreaAdjustPendingAfterBackout ? "1" : "0");
+    ini.Set(ProgressIniSection, "mineAreaAdjustPendingCornerA", mineAreaAdjustPendingCornerA ? "1" : "0");
     ini.Set(ProgressIniSection, "pathRecordReverseMode", (int)pathRecordReverseMode);
     ini.Set(ProgressIniSection, "pathRecordReverseIndex", pathRecordReverseIndex);
     ini.Set(ProgressIniSection, "pathRecordReverseKeepLineCount", pathRecordReverseKeepLineCount);
+    ini.Set(ProgressIniSection, "pathRecordReverseCount", pathRecordReverseRecords.Count);
+    for (int i = 0; i < pathRecordReverseRecords.Count; i++)
+        ini.Set(ProgressIniSection, "pathRecordReverseRecord" + i, pathRecordReverseRecords[i]);
     ini.Set(ProgressIniSection, "recallActive", recallActive ? "1" : "0");
     ini.Set(ProgressIniSection, "recallWaitingForAreaExit", recallWaitingForAreaExit ? "1" : "0");
     ini.Set(ProgressIniSection, "recallWaitingForDock", recallWaitingForDock ? "1" : "0");
@@ -7806,6 +7886,12 @@ void SaveStateProgressOnly()
     ini.Set(ProgressIniSection, "recallIndex", recallIndex);
     ini.Set(ProgressIniSection, "recallLastDone", recallLastDone);
     ini.Set(ProgressIniSection, "recallLastTotal", recallLastTotal);
+    ini.Set(ProgressIniSection, "recallCount", recallRecords.Count);
+    for (int i = 0; i < recallRecords.Count; i++)
+    {
+        ini.Set(ProgressIniSection, "recallRecord" + i, recallRecords[i]);
+        ini.Set(ProgressIniSection, "recallDone" + i, i < recallDisplayDone.Count ? recallDisplayDone[i] : recallLastDone);
+    }
     ini.Set(ProgressIniSection, "autoServiceReturnEnabled", autoServiceReturnEnabled ? "1" : "0");
     ini.Set(ProgressIniSection, "autoServiceCargoTriggerPercent", autoServiceCargoTriggerPercent.ToString("R"));
     ini.Set(ProgressIniSection, "autoServiceHydrogenTriggerPercent", autoServiceHydrogenTriggerPercent.ToString("R"));
@@ -7870,6 +7956,13 @@ void LoadState()
     if (TryParseV3(StateString(ini, "laneAnchor", V3ToString(laneAnchor)), out v)) laneAnchor = v;
     if (TryParseV3(StateString(ini, "drillAxis", V3ToString(drillAxis)), out v)) drillAxis = v;
     if (double.TryParse(StateString(ini, "laneDepth", laneDepth.ToString("R")), out d)) laneDepth = d;
+    if (double.TryParse(StateString(ini, "SPEEDF", SPEEDF.ToString("R")), out d)) SPEEDF = Math.Max(0.1, d);
+    if (double.TryParse(StateString(ini, "SPEEDB", SPEEDB.ToString("R")), out d)) SPEEDB = Math.Max(0.1, d);
+    if (double.TryParse(StateString(ini, "MINEH", MINEH.ToString("R")), out d)) MINEH = Math.Max(0.1, d);
+    if (double.TryParse(StateString(ini, "MINEW", MINEW.ToString("R")), out d)) MINEW = Math.Max(0.1, d);
+    if (double.TryParse(StateString(ini, "TOFFR", TOFFR.ToString("R")), out d)) TOFFR = d;
+    if (double.TryParse(StateString(ini, "TOFFU", TOFFU.ToString("R")), out d)) TOFFU = d;
+    if (double.TryParse(StateString(ini, "TOFFF", TOFFF.ToString("R")), out d)) TOFFF = d;
     if (double.TryParse(StateString(ini, "activeMaxSpeed", activeMaxSpeed.ToString("R")), out d)) activeMaxSpeed = d;
     if (double.TryParse(StateString(ini, "pointToPointAccelerationLimit", pointToPointAccelerationLimit.ToString("R")), out d)) pointToPointAccelerationLimit = Math.Max(0.1, d);
     if (double.TryParse(StateString(ini, "pointToPointThrustUsePercent", pointToPointThrustUsePercent.ToString("R")), out d)) pointToPointThrustUsePercent = MathHelper.Clamp(d, 1, 100);
@@ -7886,6 +7979,13 @@ void LoadState()
     if (TryParseV3(StateString(ini, "areaMineEntryPos", V3ToString(areaMineEntryPos)), out v)) areaMineEntryPos = v;
     if (TryParseV3(StateString(ini, "areaMineEntryForward", V3ToString(areaMineEntryForward)), out v)) areaMineEntryForward = v;
     if (TryParseV3(StateString(ini, "areaMineEntryUp", V3ToString(areaMineEntryUp)), out v)) areaMineEntryUp = v;
+    if (int.TryParse(StateString(ini, "activeMineAreaRecordIndex", activeMineAreaRecordIndex.ToString()), out n))
+        activeMineAreaRecordIndex = n;
+    activeMineAreaRecordLine = StateString(ini, "activeMineAreaRecordLine", activeMineAreaRecordLine);
+    areaCurrentLaneSawOre = StateBool(ini, "areaCurrentLaneSawOre", areaCurrentLaneSawOre);
+    suppressCurrentLaneEmptyRecord = StateBool(ini, "suppressCurrentLaneEmptyRecord", suppressCurrentLaneEmptyRecord);
+    LoadLaneIndexList(ini, "areaSkipLane", areaSkipLaneIndexes);
+    LoadLaneIndexList(ini, "areaEmptyLane", areaEmptyLaneIndexes);
     retryCurrentLane = StateBool(ini, "retryLane", retryCurrentLane);
     stuckBackout = StateBool(ini, "stuckBackout", stuckBackout);
     if (int.TryParse(StateString(ini, "stuckRetryCount", stuckRetryCount.ToString()), out n)) stuckRetryCount = n;
@@ -7911,6 +8011,10 @@ void LoadState()
     pathRunTimerStarted = StateBool(ini, "pathRunTimerStarted", pathRunTimerStarted);
     pathRunTimerActive = StateBool(ini, "pathRunTimerActive", pathRunTimerActive);
     if (int.TryParse(StateString(ini, "pathRunElapsedTicks", pathRunElapsedTicks.ToString()), out n)) pathRunElapsedTicks = Math.Max(0, n);
+    suppressPathRuntimeWrite = StateBool(ini, "suppressPathRuntimeWrite", suppressPathRuntimeWrite);
+    appendPathActive = StateBool(ini, "appendPathActive", appendPathActive);
+    if (int.TryParse(StateString(ini, "appendPathStopRecordIndex", appendPathStopRecordIndex.ToString()), out n))
+        appendPathStopRecordIndex = n;
 
     int pathCount = 0;
     if (int.TryParse(StateString(ini, "pathCount", "0"), out pathCount) && pathCount > 0)
@@ -7954,6 +8058,18 @@ void LoadState()
     pathRecordMineConfirmPending = StateBool(ini, "pathRecordMineConfirmPending", pathRecordMineConfirmPending);
     pathRecordMineConfirmHoldActive = StateBool(ini, "pathRecordMineConfirmHoldActive", pathRecordMineConfirmHoldActive);
     pathRecordPendingMineAreaLine = StateString(ini, "pathRecordPendingMineAreaLine", pathRecordPendingMineAreaLine);
+    if (int.TryParse(StateString(ini, "mineAreaAdjustStage", ((int)mineAreaAdjustStage).ToString()), out n))
+    {
+        if (n < 0 || n > (int)MineAreaAdjustStage.ReturnToMinePoseAfterSet)
+            n = 0;
+        mineAreaAdjustStage = (MineAreaAdjustStage)n;
+    }
+    mineAreaAdjustCornerA = StateBool(ini, "mineAreaAdjustCornerA", mineAreaAdjustCornerA);
+    mineAreaAdjustFromPath = StateBool(ini, "mineAreaAdjustFromPath", mineAreaAdjustFromPath);
+    mineAreaAdjustSaveToCarrier = StateBool(ini, "mineAreaAdjustSaveToCarrier", mineAreaAdjustSaveToCarrier);
+    mineAreaAdjustmentDirty = StateBool(ini, "mineAreaAdjustmentDirty", mineAreaAdjustmentDirty);
+    mineAreaAdjustPendingAfterBackout = StateBool(ini, "mineAreaAdjustPendingAfterBackout", mineAreaAdjustPendingAfterBackout);
+    mineAreaAdjustPendingCornerA = StateBool(ini, "mineAreaAdjustPendingCornerA", mineAreaAdjustPendingCornerA);
     if (pathRecordMineConfirmPending)
     {
         OpenMinerMenu(MiLcdMenu.RecordPath);
@@ -8068,6 +8184,7 @@ void LoadState()
     if (double.TryParse(StateString(ini, "carrierPoseAgeSeconds", carrierPoseAgeSeconds.ToString("R")), out d)) carrierPoseAgeSeconds = d;
 
     RecoverPathRecordsAfterLoad();
+    RecoverPathRecordReverseAfterLoad();
     RecoverAreaLanesAfterLoad();
     RecoverDockPoseAfterLoad();
     if (recallActive && recallRecords.Count == 0 && !recallWaitingForAreaExit && !recallWaitingForDock && pathRecords.Count > 0)
@@ -8114,6 +8231,93 @@ void RecoverPathRecordsAfterLoad()
     }
 }
 
+void RecoverPathRecordReverseAfterLoad()
+{
+    if (pathRecordReverseMode == PathRecordReverseMode.None ||
+        pathRecordReverseRecords.Count > 0)
+        return;
+
+    List<string> lines;
+    string timerName;
+    if (!TryReadPathTimerLines(out lines, out timerName))
+    {
+        ClearPathRecordReverseState();
+        return;
+    }
+
+    int anchorIndex;
+    Vector3D anchorPos, anchorForward, anchorUp;
+    if (!TryFindPathAnchor(lines, out anchorIndex, out anchorPos, out anchorForward, out anchorUp))
+    {
+        ClearPathRecordReverseState();
+        return;
+    }
+
+    List<string> reverseRecords = new List<string>();
+    int keepLineCount = anchorIndex + 1;
+
+    if (pathRecordReverseMode == PathRecordReverseMode.Undo)
+    {
+        int lastMineAreaIndex = -1;
+        Vector3D cornerA, cornerB, areaUp, areaForward;
+        double depth;
+        for (int i = anchorIndex + 1; i < lines.Count; i++)
+            if (LineLooksLikeMineArea(lines[i]) &&
+                TryParseMineAreaLine(lines[i], anchorPos, out cornerA, out cornerB, out areaUp, out areaForward, out depth))
+                lastMineAreaIndex = i;
+
+        if (lastMineAreaIndex >= 0)
+        {
+            Vector3D lastCornerA, lastCornerB, lastAreaUp, lastAreaForward;
+            if (!TryParseMineAreaLine(lines[lastMineAreaIndex], anchorPos,
+                                      out lastCornerA, out lastCornerB, out lastAreaUp, out lastAreaForward, out depth))
+            {
+                ClearPathRecordReverseState();
+                return;
+            }
+
+            Vector3D pos, fwd, up;
+            for (int i = lines.Count - 1; i > lastMineAreaIndex; i--)
+            {
+                if (TryParsePathPointLine(lines[i], anchorPos, out pos, out fwd, out up))
+                    reverseRecords.Add(lines[i]);
+            }
+            reverseRecords.Add(FormatPathPointLine(GetInferredMineAreaEntryPose(lastCornerA, lastCornerB), anchorPos, lastAreaForward, lastAreaUp));
+            keepLineCount = lastMineAreaIndex + 1;
+        }
+        else
+        {
+            Vector3D pos, fwd, up;
+            for (int i = lines.Count - 1; i > anchorIndex; i--)
+                if (TryParsePathPointLine(lines[i], anchorPos, out pos, out fwd, out up))
+                    reverseRecords.Add(lines[i]);
+            reverseRecords.Add(FormatPathPointLine(anchorPos, anchorPos, anchorForward, anchorUp));
+            keepLineCount = anchorIndex + 1;
+        }
+    }
+    else
+    {
+        Vector3D pos, fwd, up;
+        for (int i = lines.Count - 1; i > anchorIndex; i--)
+            if (TryParsePathPointLine(lines[i], anchorPos, out pos, out fwd, out up))
+                reverseRecords.Add(lines[i]);
+        reverseRecords.Add(FormatPathPointLine(anchorPos, anchorPos, anchorForward, anchorUp));
+        keepLineCount = anchorIndex + 1;
+    }
+
+    pathRecordReverseRecords = reverseRecords;
+    pathRecordReverseKeepLineCount = keepLineCount;
+    if (pathRecordReverseIndex < 0)
+        pathRecordReverseIndex = 0;
+    if (pathRecordReverseIndex > pathRecordReverseRecords.Count)
+        pathRecordReverseIndex = pathRecordReverseRecords.Count;
+    pathRecordingPaused = true;
+    pathAnchorValid = true;
+    pathAnchorPos = anchorPos;
+    pathAnchorForward = anchorForward;
+    pathAnchorUp = anchorUp;
+}
+
 void RecoverAreaLanesAfterLoad()
 {
     if (!areaMiningMode)
@@ -8143,6 +8347,19 @@ void RecoverAreaLanesAfterLoad()
         areaLaneIndex = 0;
     if (areaLaneIndex >= areaLaneCount)
         areaLaneIndex = areaLaneCount - 1;
+
+    if (activeMineAreaRecordIndex >= 0 && pathRecords.Count == 0)
+    {
+        List<string> loaded;
+        string timerName;
+        if (TryLoadPathRecordsFromTimer(out loaded, out timerName))
+            pathRecords = loaded;
+    }
+
+    if (areaSkipLaneIndexes.Count == 0 &&
+        areaEmptyLaneIndexes.Count == 0 &&
+        activeMineAreaRecordIndex >= 0)
+        LoadActiveMineAreaSkipMetadata();
 
     laneAnchor = areaPlanValid ? GetAreaLaneAnchor(areaLaneIndex) : areaLaneAnchors[areaLaneIndex];
 }
